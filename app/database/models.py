@@ -1,0 +1,170 @@
+from typing import Optional
+from .connection import get_connection
+
+
+# ── Items ──────────────────────────────────────────────────────────────────
+
+def get_all_items() -> list[dict]:
+    with get_connection() as conn:
+        rows = conn.execute("""
+            SELECT i.*,
+                   GROUP_CONCAT(DISTINCT l.platform) AS platforms,
+                   COUNT(DISTINCT l.id) AS listing_count,
+                   MAX(l.listing_price) AS listed_price
+            FROM items i
+            LEFT JOIN listings l ON l.item_id = i.id AND l.status = 'active'
+            GROUP BY i.id
+            ORDER BY i.created_at DESC
+        """).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_item(item_id: int) -> Optional[dict]:
+    with get_connection() as conn:
+        row = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+        if not row:
+            return None
+        item = dict(row)
+        item["listings"] = [dict(r) for r in conn.execute(
+            "SELECT * FROM listings WHERE item_id = ? ORDER BY platform", (item_id,)
+        ).fetchall()]
+        item["images"] = [dict(r) for r in conn.execute(
+            "SELECT * FROM images WHERE item_id = ? ORDER BY is_primary DESC", (item_id,)
+        ).fetchall()]
+        return item
+
+
+def save_item(data: dict) -> int:
+    fields = ("title", "description", "bin_location", "category",
+              "purchase_cost", "purchase_date", "notes")
+    values = tuple(data.get(f, "" if f != "purchase_cost" else 0) for f in fields)
+    with get_connection() as conn:
+        if data.get("id"):
+            conn.execute(
+                f"UPDATE items SET {', '.join(f+'=?' for f in fields)} WHERE id=?",
+                values + (data["id"],)
+            )
+            return data["id"]
+        cur = conn.execute(
+            f"INSERT INTO items ({', '.join(fields)}) VALUES ({', '.join('?' * len(fields))})",
+            values
+        )
+        return cur.lastrowid
+
+
+def delete_item(item_id: int):
+    with get_connection() as conn:
+        conn.execute("DELETE FROM items WHERE id = ?", (item_id,))
+
+
+# ── Listings ───────────────────────────────────────────────────────────────
+
+def upsert_listing(data: dict) -> int:
+    fields = ("item_id", "platform", "listing_id", "url",
+              "listing_price", "status", "listed_date", "sold_date", "sold_price")
+    values = tuple(data.get(f, "") for f in fields)
+    with get_connection() as conn:
+        cur = conn.execute(f"""
+            INSERT INTO listings ({', '.join(fields)}) VALUES ({', '.join('?' * len(fields))})
+            ON CONFLICT(platform, listing_id) DO UPDATE SET
+                url=excluded.url,
+                listing_price=excluded.listing_price,
+                status=excluded.status,
+                sold_date=excluded.sold_date,
+                sold_price=excluded.sold_price,
+                updated_at=datetime('now')
+        """, values)
+        return cur.lastrowid
+
+
+def delete_listing(listing_id: int):
+    with get_connection() as conn:
+        conn.execute("DELETE FROM listings WHERE id = ?", (listing_id,))
+
+
+# ── Images ─────────────────────────────────────────────────────────────────
+
+def save_image(data: dict) -> int:
+    with get_connection() as conn:
+        cur = conn.execute(
+            "INSERT INTO images (item_id, local_path, image_hash, source_url, is_primary) VALUES (?,?,?,?,?)",
+            (data["item_id"], data["local_path"], data.get("image_hash", ""),
+             data.get("source_url", ""), data.get("is_primary", 0))
+        )
+        return cur.lastrowid
+
+
+def get_items_by_hash(image_hash: str) -> list[dict]:
+    with get_connection() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT DISTINCT item_id FROM images WHERE image_hash = ?", (image_hash,)
+        ).fetchall()]
+
+
+# ── Sales ──────────────────────────────────────────────────────────────────
+
+def save_sale(data: dict) -> int:
+    with get_connection() as conn:
+        cur = conn.execute(
+            "INSERT INTO sales (item_id, listing_id, platform, sale_price, platform_fees, shipping_cost, sale_date) VALUES (?,?,?,?,?,?,?)",
+            (data["item_id"], data.get("listing_id"), data["platform"],
+             data["sale_price"], data.get("platform_fees", 0),
+             data.get("shipping_cost", 0), data["sale_date"])
+        )
+        return cur.lastrowid
+
+
+def get_sales(year: Optional[int] = None, month: Optional[int] = None) -> list[dict]:
+    where, params = [], []
+    if year:
+        where.append("strftime('%Y', s.sale_date) = ?")
+        params.append(str(year))
+    if month:
+        where.append("strftime('%m', s.sale_date) = ?")
+        params.append(f"{month:02d}")
+    clause = ("WHERE " + " AND ".join(where)) if where else ""
+    with get_connection() as conn:
+        rows = conn.execute(f"""
+            SELECT s.*,
+                   i.title,
+                   i.purchase_cost,
+                   (s.sale_price - s.platform_fees - s.shipping_cost - COALESCE(i.purchase_cost,0)) AS profit
+            FROM sales s
+            JOIN items i ON i.id = s.item_id
+            {clause}
+            ORDER BY s.sale_date DESC
+        """, params).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_monthly_platform_totals(year: int) -> dict:
+    with get_connection() as conn:
+        rows = conn.execute("""
+            SELECT platform,
+                   CAST(strftime('%m', sale_date) AS INTEGER) AS month,
+                   SUM(sale_price - platform_fees - shipping_cost) AS revenue,
+                   SUM(sale_price - platform_fees - shipping_cost - COALESCE(
+                       (SELECT purchase_cost FROM items WHERE id = sales.item_id), 0
+                   )) AS profit
+            FROM sales
+            WHERE strftime('%Y', sale_date) = ?
+            GROUP BY platform, month
+            ORDER BY month
+        """, (str(year),)).fetchall()
+        return [dict(r) for r in rows]
+
+
+# ── Settings ───────────────────────────────────────────────────────────────
+
+def get_setting(key: str, default: str = "") -> str:
+    with get_connection() as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else default
+
+
+def set_setting(key: str, value: str):
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+            (key, str(value))
+        )

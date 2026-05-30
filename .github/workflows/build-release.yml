@@ -1,0 +1,67 @@
+name: Build & Release Installer
+
+on:
+  push:
+    tags:
+      - 'v*'          # triggers on v1.0.0, v1.2.3, etc.
+  workflow_dispatch:  # allow manual trigger from GitHub UI
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          py -m pip install --upgrade pip
+          py -m pip install -r requirements.txt
+          py -m pip install pyinstaller
+
+      - name: Build with PyInstaller
+        run: py -m PyInstaller bom_reseller.spec --noconfirm
+
+      - name: Create LICENSE if missing
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "LICENSE")) {
+            "MIT License`n`nCopyright (c) 2026 Bruiserbaum`n`nPermission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the `"Software`"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:`n`nThe above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.`n`nTHE SOFTWARE IS PROVIDED `"AS IS`", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED." | Out-File LICENSE -Encoding utf8
+          }
+
+      - name: Build Inno Setup installer
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\setup.iss
+        shell: pwsh
+
+      - name: Get version from tag
+        id: version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          echo "VERSION=$tag" >> $env:GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          name: BOM Reseller ${{ steps.version.outputs.VERSION }}
+          draft: false
+          prerelease: false
+          files: dist/BOMResellerSetup.exe
+          body: |
+            ## BOM Reseller ${{ steps.version.outputs.VERSION }}
+
+            ### Install
+            Download `BOMResellerSetup.exe` below and run it. No Python required.
+
+            ### What's new
+            See the [commit history](https://github.com/Bruiserbaum/baum-reseller/commits/${{ steps.version.outputs.VERSION }}) for changes in this release.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
