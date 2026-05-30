@@ -15,7 +15,7 @@ def main():
     from app.main_window import MainWindow
 
     app = QApplication(sys.argv)
-    app.setApplicationName("BOM Reseller")
+    app.setApplicationName("Baum Reseller")
     app.setOrganizationName("Baum")
 
     style_path = os.path.join(os.path.dirname(__file__), "assets", "style.qss")

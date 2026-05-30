@@ -26,7 +26,7 @@ jobs:
           py -m pip install pyinstaller
 
       - name: Build with PyInstaller
-        run: py -m PyInstaller bom_reseller.spec --noconfirm
+        run: py -m PyInstaller baum_reseller.spec --noconfirm
 
       - name: Create LICENSE if missing
         shell: pwsh
@@ -51,17 +51,17 @@ jobs:
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
-          name: BOM Reseller ${{ steps.version.outputs.VERSION }}
+          name: Baum Reseller ${{ steps.version.outputs.VERSION }}
           draft: false
           prerelease: false
-          files: dist/BOMResellerSetup.exe
+          files: dist/BaumResellerSetup.exe
           body: |
-            ## BOM Reseller ${{ steps.version.outputs.VERSION }}
+            ## Baum Reseller ${{ steps.version.outputs.VERSION }}
 
             ### Install
-            Download `BOMResellerSetup.exe` below and run it. No Python required.
+            Download `BaumResellerSetup.exe` below and run it. No Python required.
 
             ### What's new
-            See the [commit history](https://github.com/Bruiserbaum/baum-reseller/commits/${{ steps.version.outputs.VERSION }}) for changes in this release.
+            See the [commit history](https://github.com/Bruiserbaum/Baum-Reseller/commits/${{ steps.version.outputs.VERSION }}) for changes in this release.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

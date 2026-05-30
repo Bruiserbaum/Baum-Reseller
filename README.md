@@ -1,4 +1,4 @@
-# BOM Reseller
+# Baum Reseller
 
 A Windows desktop app for managing reselling inventory across **eBay**, **Mercari**, and **Poshmark**.
 
@@ -45,7 +45,7 @@ Alerts show as Windows toast notifications and appear in the in-app **Alerts** p
 
 ## Installation
 
-Download the latest `BOMResellerSetup.exe` from the [Releases](../../releases/latest) page and run it. No Python required.
+Download the latest `BaumResellerSetup.exe` from the [Releases](../../releases/latest) page and run it. No Python required.
 
 ---
 
@@ -54,7 +54,7 @@ Download the latest `BOMResellerSetup.exe` from the [Releases](../../releases/la
 ### 1. eBay
 1. Go to the [eBay Developer Program](https://developer.ebay.com) and create an app
 2. Copy your **Client ID** and **Client Secret**
-3. In BOM Reseller → Settings → eBay row → enter credentials → **Save** → **Test**
+3. In Baum Reseller → Settings → eBay row → enter credentials → **Save** → **Test**
 
 ### 2. Mercari & Poshmark
 1. In Settings, find the Mercari or Poshmark row
@@ -77,13 +77,13 @@ Download the latest `BOMResellerSetup.exe` from the [Releases](../../releases/la
 
 ### Steps
 ```bat
-git clone https://github.com/Bruiserbaum/baum-reseller.git
-cd baum-reseller
+git clone https://github.com/Bruiserbaum/Baum-Reseller.git
+cd Baum-Reseller
 py -m pip install -r requirements.txt
 build.bat
 ```
 
-The installer will be output to `dist\BOMResellerSetup.exe`.
+The installer will be output to `dist\BaumResellerSetup.exe`.
 
 ---
 
@@ -110,7 +110,7 @@ py main.py
 ### Project Structure
 
 ```
-baum-reseller/
+Baum-Reseller/
 ├── main.py                      # Entry point
 ├── version.py                   # App version + GitHub repo
 ├── app/

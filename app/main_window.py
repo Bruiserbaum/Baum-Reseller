@@ -22,7 +22,7 @@ NAV = [
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("BOM Reseller")
+        self.setWindowTitle("Baum Reseller")
         self.setMinimumSize(1100, 680)
         self.resize(1340, 820)
 
@@ -74,7 +74,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        title = QLabel("BOM\nReseller")
+        title = QLabel("Baum\nReseller")
         title.setObjectName("sidebarTitle")
         title.setAlignment(Qt.AlignCenter)
         layout.addWidget(title)
@@ -133,4 +133,4 @@ class MainWindow(QMainWindow):
 
     def _refresh_status(self):
         last = get_setting("last_sync_time", "Never")
-        self.status_bar.showMessage(f"Last synced: {last}  |  BOM Reseller v{VERSION}")
+        self.status_bar.showMessage(f"Last synced: {last}  |  Baum Reseller v{VERSION}")

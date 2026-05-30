@@ -1,9 +1,9 @@
-#define MyAppName      "BOM Reseller"
+#define MyAppName      "Baum Reseller"
 #define MyAppVersion   "1.0.0"
 #define MyAppPublisher "Bruiserbaum"
-#define MyAppURL       "https://github.com/Bruiserbaum/baum-reseller"
-#define MyAppExeName   "BOMReseller.exe"
-#define BuildDir       "..\dist\BOMReseller"
+#define MyAppURL       "https://github.com/Bruiserbaum/Baum-Reseller"
+#define MyAppExeName   "BaumReseller.exe"
+#define BuildDir       "..\dist\BaumReseller"
 
 [Setup]
 AppId={{A3F2B8C1-4D7E-4F9A-B2C3-8E1D5F6A7B9C}
@@ -18,7 +18,7 @@ DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
 LicenseFile=..\LICENSE
 OutputDir=..\dist
-OutputBaseFilename=BOMResellerSetup
+OutputBaseFilename=BaumResellerSetup
 SetupIconFile=
 Compression=lzma2/ultra64
 SolidCompression=yes

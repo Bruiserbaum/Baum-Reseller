@@ -27,7 +27,7 @@ def generate_pdf(path: str, year: int, month: Optional[int] = None):
 
     # Title
     period = MONTHS[month - 1] if month else str(year)
-    story.append(Paragraph(f"BOM Reseller — Sales Report: {period} {year}", styles["Title"]))
+    story.append(Paragraph(f"Baum Reseller — Sales Report: {period} {year}", styles["Title"]))
     story.append(Paragraph(f"Generated {datetime.date.today()}", styles["Normal"]))
     story.append(Spacer(1, 0.2 * inch))
     story.append(HRFlowable(width="100%"))

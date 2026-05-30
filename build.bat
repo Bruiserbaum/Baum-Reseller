@@ -1,11 +1,11 @@
 @echo off
 echo ========================================
-echo  BOM Reseller - Local Build
+echo  Baum Reseller - Local Build
 echo ========================================
 
 echo.
 echo [1/3] Running PyInstaller...
-py -m PyInstaller bom_reseller.spec --noconfirm
+py -m PyInstaller baum_reseller.spec --noconfirm
 if errorlevel 1 (
     echo ERROR: PyInstaller failed.
     pause
@@ -25,10 +25,10 @@ if exist "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" (
 
 echo.
 echo [3/3] Done!
-if exist "dist\BOMResellerSetup.exe" (
-    echo Installer: dist\BOMResellerSetup.exe
+if exist "dist\BaumResellerSetup.exe" (
+    echo Installer: dist\BaumResellerSetup.exe
 ) else (
-    echo Binary folder: dist\BOMReseller\BOMReseller.exe
+    echo Binary folder: dist\BaumReseller\BaumReseller.exe
 )
 echo.
 pause

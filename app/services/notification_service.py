@@ -146,7 +146,7 @@ def _send_toast(title: str, message: str):
         notification.notify(
             title=title,
             message=message,
-            app_name="BOM Reseller",
+            app_name="Baum Reseller",
             timeout=8,
         )
     except Exception:

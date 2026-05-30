@@ -7,6 +7,5 @@ data/
 *.log
 dist/
 build/
-*.spec
 .venv/
 venv/
