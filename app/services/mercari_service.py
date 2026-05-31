@@ -1,7 +1,7 @@
 """
 Mercari integration — Playwright browser automation.
-Supports email/password AND Google SSO via a visible browser window.
-Falls back to system Chrome/Edge if Playwright's Chromium isn't present.
+Uses a persistent Chrome/Edge profile so Google Sign-In works and sessions survive
+between app restarts without re-authentication.
 """
 import os
 import re
@@ -9,28 +9,51 @@ import json
 import threading
 import keyring
 
-SERVICE    = "baum-reseller-mercari"
-STATE_FILE = os.path.join(os.path.expanduser("~"), ".baum-reseller", "mercari_state.json")
-LOGIN_URL  = "https://www.mercari.com/login/"
-HOME_URL   = "https://www.mercari.com/"
+SERVICE     = "baum-reseller-mercari"
+PROFILE_DIR = os.path.join(os.path.expanduser("~"), ".baum-reseller", "mercari_profile")
+LOGIN_URL   = "https://www.mercari.com/login/"
+HOME_URL    = "https://www.mercari.com/"
+
+_ANTI_DETECT_SCRIPT = """
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    Object.defineProperty(navigator, 'plugins',   { get: () => [1,2,3,4,5] });
+    window.chrome = { runtime: {} };
+"""
 
 
-def _launch_browser(playwright, headless: bool):
-    attempts = [
-        {"channel": "chrome",  "headless": headless, "slow_mo": 50 if not headless else 0},
-        {"channel": "msedge",  "headless": headless, "slow_mo": 50 if not headless else 0},
-        {"headless": headless, "slow_mo": 50 if not headless else 0},
-    ]
+def _launch_persistent_context(playwright, headless: bool):
+    os.makedirs(PROFILE_DIR, exist_ok=True)
+    base_kwargs = dict(
+        headless=headless,
+        args=[
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--start-maximized",
+        ],
+        ignore_default_args=["--enable-automation"],
+        viewport=None,
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+    )
+    if not headless:
+        base_kwargs["slow_mo"] = 50
+
     last_err = None
-    for kwargs in attempts:
+    for channel in ("chrome", "msedge", None):
         try:
-            return playwright.chromium.launch(**kwargs)
+            kwargs = dict(base_kwargs)
+            if channel:
+                kwargs["channel"] = channel
+            return playwright.chromium.launch_persistent_context(PROFILE_DIR, **kwargs)
         except Exception as e:
             last_err = e
+
     raise RuntimeError(
-        f"No browser found (Chrome, Edge, or Playwright Chromium).\n"
-        f"Install Chrome or run:  py -m playwright install chromium\n\n"
-        f"Detail: {last_err}"
+        f"No usable browser found (Chrome, Edge, or Playwright Chromium).\n"
+        f"Install Chrome/Edge or run:  py -m playwright install chromium\n\n{last_err}"
     )
 
 
@@ -51,11 +74,13 @@ class MercariService:
             return str(e)
 
     def has_session(self) -> bool:
-        return os.path.exists(STATE_FILE)
+        cookies = os.path.join(PROFILE_DIR, "Default", "Cookies")
+        return os.path.exists(PROFILE_DIR) and os.path.exists(cookies)
 
     def clear_session(self):
-        if os.path.exists(STATE_FILE):
-            os.remove(STATE_FILE)
+        import shutil
+        if os.path.exists(PROFILE_DIR):
+            shutil.rmtree(PROFILE_DIR, ignore_errors=True)
 
     # ── Browser login ─────────────────────────────────────────────────────
 
@@ -67,9 +92,9 @@ class MercariService:
                 creds = self.get_credentials()
 
                 with sync_playwright() as p:
-                    browser = _launch_browser(p, headless=False)
-                    ctx  = browser.new_context()
+                    ctx  = _launch_persistent_context(p, headless=False)
                     page = ctx.new_page()
+                    page.add_init_script(_ANTI_DETECT_SCRIPT)
 
                     page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=30_000)
                     page.bring_to_front()
@@ -89,11 +114,10 @@ class MercariService:
                         )
                     except PWTimeout:
                         raise RuntimeError(
-                            "Login window timed out after 3 minutes without detecting a successful login."
+                            "Login window timed out (3 min) without a successful sign-in."
                         )
 
-                    ctx.storage_state(path=STATE_FILE)
-                    browser.close()
+                    ctx.close()
                 ok = True
 
             except Exception as e:
@@ -109,19 +133,18 @@ class MercariService:
 
     def test_connection(self) -> tuple[bool, str]:
         if not self.has_session():
-            return False, "Not logged in — click 'Login with Browser' to authenticate."
+            return False, "Not logged in — click 'Login with Browser'."
         try:
             from playwright.sync_api import sync_playwright
             with sync_playwright() as p:
-                browser = _launch_browser(p, headless=True)
-                ctx  = browser.new_context(storage_state=STATE_FILE)
+                ctx  = _launch_persistent_context(p, headless=True)
                 page = ctx.new_page()
+                page.add_init_script(_ANTI_DETECT_SCRIPT)
                 page.goto(HOME_URL, wait_until="domcontentloaded", timeout=20_000)
                 url  = page.url
-                browser.close()
+                ctx.close()
             if "/login" in url:
-                self.clear_session()
-                return False, "Session expired — click 'Login with Browser' to re-authenticate."
+                return False, "Session expired — click 'Login with Browser' again."
             return True, "Connected to Mercari ✓"
         except Exception as e:
             return False, str(e)
@@ -130,7 +153,7 @@ class MercariService:
 
     def fetch_listings(self, progress_cb=None) -> list[dict]:
         if not self.has_session():
-            raise ValueError("Not logged in to Mercari. Click 'Login with Browser' in Settings first.")
+            raise ValueError("Not logged in to Mercari. Click 'Login with Browser' first.")
 
         from playwright.sync_api import sync_playwright
         intercepted: list[dict] = []
@@ -146,9 +169,9 @@ class MercariService:
                     pass
 
         with sync_playwright() as p:
-            browser = _launch_browser(p, headless=True)
-            ctx  = browser.new_context(storage_state=STATE_FILE)
+            ctx  = _launch_persistent_context(p, headless=True)
             page = ctx.new_page()
+            page.add_init_script(_ANTI_DETECT_SCRIPT)
             page.on("response", _on_response)
 
             if progress_cb:
@@ -156,9 +179,8 @@ class MercariService:
 
             page.goto(HOME_URL, wait_until="domcontentloaded", timeout=30_000)
             if "/login" in page.url:
-                browser.close()
-                self.clear_session()
-                raise ValueError("Mercari session expired — please re-authenticate.")
+                ctx.close()
+                return []
 
             if progress_cb:
                 progress_cb("Loading Mercari listings…")
@@ -176,7 +198,7 @@ class MercariService:
                 page.wait_for_timeout(1_000)
 
             dom_results = _scrape_dom(page) if not intercepted else []
-            browser.close()
+            ctx.close()
 
         return _parse_api_responses(intercepted) if intercepted else dom_results
 
