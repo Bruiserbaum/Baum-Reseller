@@ -1,2 +1,2 @@
-VERSION = "1.1.2"
+VERSION = "1.1.3"
 GITHUB_REPO = "Bruiserbaum/Baum-Reseller"

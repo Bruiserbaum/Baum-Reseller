@@ -524,32 +524,46 @@ class SettingsView(QWidget):
             self.update_status.setText(f"You're up to date (v{VERSION}).")
 
     def _do_update(self):
-        from app.services.updater_service import get_latest_release, download_and_apply_update
+        from app.services.updater_service import get_latest_release, find_update_asset, download_and_apply_update
         release = get_latest_release()
         if not release:
             QMessageBox.critical(self, "Update", "Could not fetch release info.")
             return
-        assets = release.get("assets", [])
-        zip_asset = next((a for a in assets if a["name"].endswith(".zip")), None)
-        if not zip_asset:
-            QMessageBox.critical(self, "Update", "No zip asset found in release.")
+        asset = find_update_asset(release)
+        if not asset:
+            QMessageBox.critical(self, "Update",
+                                 "No installer found in the release assets.\n"
+                                 "Please download manually from GitHub.")
             return
 
         self.update_progress.show()
         self.update_progress.setValue(0)
 
         def _progress(pct):
-            post_to_main(lambda:self.update_progress.setValue(pct))
+            post_to_main(lambda: self.update_progress.setValue(pct))
 
         def _done(ok, err):
-            post_to_main(lambda:(
-                self.update_progress.hide(),
-                QMessageBox.information(self, "Update", "Update applied. Restarting…") if ok
-                else QMessageBox.critical(self, "Update Failed", str(err))
-            ))
+            if ok:
+                post_to_main(lambda: (
+                    self.update_progress.hide(),
+                    QMessageBox.information(
+                        self, "Update",
+                        "The installer is running in the background.\n"
+                        "The app will close and reopen when the update finishes."
+                    )
+                ))
+            else:
+                post_to_main(lambda: (
+                    self.update_progress.hide(),
+                    QMessageBox.critical(self, "Update Failed", str(err))
+                ))
 
-        download_and_apply_update(zip_asset["browser_download_url"],
-                                  progress_cb=_progress, done_cb=_done)
+        download_and_apply_update(
+            asset["browser_download_url"],
+            asset["name"],
+            progress_cb=_progress,
+            done_cb=_done,
+        )
 
     # ── Backup ────────────────────────────────────────────────────────────
 
