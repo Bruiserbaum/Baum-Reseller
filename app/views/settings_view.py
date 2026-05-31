@@ -112,7 +112,7 @@ class SettingsView(QWidget):
         layout.addWidget(update_group)
 
         # ── Backup ────────────────────────────────────────────────────────
-        backup_group = QGroupBox("Backup & Restore")
+        backup_group = QGroupBox("Backup && Restore")
         backup_layout = QVBoxLayout(backup_group)
 
         gdrive_row = QHBoxLayout()
