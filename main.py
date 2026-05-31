@@ -18,6 +18,9 @@ def main():
     app.setApplicationName("Baum Reseller")
     app.setOrganizationName("Baum")
 
+    from app.utils.qt_thread import init_bridge
+    init_bridge()
+
     style_path = os.path.join(os.path.dirname(__file__), "assets", "style.qss")
     if os.path.exists(style_path):
         with open(style_path, "r", encoding="utf-8") as f:

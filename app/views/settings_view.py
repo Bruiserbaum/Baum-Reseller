@@ -7,7 +7,8 @@ from PySide6.QtWidgets import (
     QLineEdit, QGroupBox, QScrollArea, QMessageBox,
     QComboBox, QProgressBar, QFileDialog, QFrame
 )
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt
+from app.utils.qt_thread import post_to_main
 
 from app.database.models import get_setting, set_setting
 from version import VERSION
@@ -361,12 +362,18 @@ class SettingsView(QWidget):
 
     def _save_platform_creds(self, platform: str, email: str, password: str):
         svc = self._get_service(platform)
-        svc.save_credentials(email, password)
-        QMessageBox.information(
-            self, PLATFORM_DISPLAY[platform],
-            "Credentials saved for browser auto-fill.\n"
-            "Click 'Login with Browser' to authenticate."
-        )
+        err = svc.save_credentials(email, password)
+        if err:
+            QMessageBox.warning(
+                self, PLATFORM_DISPLAY[platform],
+                f"Failed to save credentials:\n{err}"
+            )
+        else:
+            QMessageBox.information(
+                self, PLATFORM_DISPLAY[platform],
+                "Credentials saved.\n\nClick 'Login with Browser' to authenticate.\n"
+                "(You can also sign in with Google in the browser window.)"
+            )
 
     # ── Browser login ─────────────────────────────────────────────────────
 
@@ -380,7 +387,7 @@ class SettingsView(QWidget):
         svc = self._get_service(platform)
 
         def _done(ok: bool, err: str | None):
-            QTimer.singleShot(0, lambda: self._on_browser_login_done(
+            post_to_main(lambda:self._on_browser_login_done(
                 ok, err, platform, status_lbl, dot, login_btn
             ))
 
@@ -421,7 +428,7 @@ class SettingsView(QWidget):
                 ok, msg = svc.test_connection()
             except Exception as e:
                 ok, msg = False, str(e)
-            QTimer.singleShot(0, lambda: self._on_test_done(ok, msg, platform, status_lbl, dot))
+            post_to_main(lambda:self._on_test_done(ok, msg, platform, status_lbl, dot))
 
         threading.Thread(target=_run, daemon=True).start()
 
@@ -447,7 +454,7 @@ class SettingsView(QWidget):
         sync_platform(
             platform,
             done_cb=lambda ok, count, err:
-            QTimer.singleShot(0, lambda: self._on_sync_done(ok, count, err))
+            post_to_main(lambda:self._on_sync_done(ok, count, err))
         )
 
     def _force_sync(self):
@@ -458,7 +465,7 @@ class SettingsView(QWidget):
 
         from app.services.sync_service import sync_all
         sync_all(done_cb=lambda total, errors:
-                 QTimer.singleShot(0, lambda: self._on_all_sync_done(total, errors)))
+                 post_to_main(lambda:self._on_all_sync_done(total, errors)))
 
     def _on_sync_done(self, ok: bool, count: int, err: str | None):
         self.sync_btn.setEnabled(True)
@@ -494,7 +501,7 @@ class SettingsView(QWidget):
                 error = str(e)
             finally:
                 # Always fires — even if an exception was raised
-                QTimer.singleShot(0, lambda: self._on_update_check(available, latest, error))
+                post_to_main(lambda:self._on_update_check(available, latest, error))
 
         threading.Thread(target=_check, daemon=True).start()
 
@@ -532,10 +539,10 @@ class SettingsView(QWidget):
         self.update_progress.setValue(0)
 
         def _progress(pct):
-            QTimer.singleShot(0, lambda: self.update_progress.setValue(pct))
+            post_to_main(lambda:self.update_progress.setValue(pct))
 
         def _done(ok, err):
-            QTimer.singleShot(0, lambda: (
+            post_to_main(lambda:(
                 self.update_progress.hide(),
                 QMessageBox.information(self, "Update", "Update applied. Restarting…") if ok
                 else QMessageBox.critical(self, "Update Failed", str(err))
@@ -565,7 +572,7 @@ class SettingsView(QWidget):
             upload_backup_to_drive(
                 tmp,
                 done_cb=lambda ok, err:
-                QTimer.singleShot(0, lambda: self._on_backup_done(ok, err))
+                post_to_main(lambda:self._on_backup_done(ok, err))
             )
         except Exception as e:
             self.backup_status.setText(f"Backup failed: {e}")
