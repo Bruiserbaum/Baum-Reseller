@@ -1,9 +1,10 @@
 import os
 import datetime
+import threading
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QLineEdit, QGroupBox, QFormLayout, QScrollArea, QMessageBox,
+    QLineEdit, QGroupBox, QScrollArea, QMessageBox,
     QComboBox, QProgressBar, QFileDialog, QFrame
 )
 from PySide6.QtCore import Qt, QTimer
@@ -43,11 +44,21 @@ class SettingsView(QWidget):
         conn_group = QGroupBox("Platform Connections")
         conn_layout = QVBoxLayout(conn_group)
 
+        note = QLabel(
+            "eBay uses API keys. Mercari and Poshmark use browser-based login — "
+            "works with email/password or Google Sign-In."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #a6adc8; font-size: 11px;")
+        conn_layout.addWidget(note)
+
         self._platform_rows: dict[str, dict] = {}
-        for platform in ("ebay", "mercari", "poshmark"):
-            row = self._build_platform_row(platform)
+        self._platform_rows["ebay"]     = self._build_ebay_row()
+        self._platform_rows["mercari"]  = self._build_browser_row("mercari")
+        self._platform_rows["poshmark"] = self._build_browser_row("poshmark")
+
+        for row in self._platform_rows.values():
             conn_layout.addWidget(row["widget"])
-            self._platform_rows[platform] = row
 
         layout.addWidget(conn_group)
 
@@ -103,7 +114,6 @@ class SettingsView(QWidget):
         backup_group = QGroupBox("Backup & Restore")
         backup_layout = QVBoxLayout(backup_group)
 
-        # Google Drive
         gdrive_row = QHBoxLayout()
         self.gdrive_status = QLabel("Google Drive: Not connected")
         gdrive_row.addWidget(self.gdrive_status)
@@ -113,7 +123,6 @@ class SettingsView(QWidget):
         gdrive_row.addWidget(connect_drive_btn)
         backup_layout.addLayout(gdrive_row)
 
-        # Last backup
         bk_row = QHBoxLayout()
         self.last_backup_label = QLabel("Last backup: Never")
         bk_row.addWidget(self.last_backup_label)
@@ -124,7 +133,6 @@ class SettingsView(QWidget):
         bk_row.addWidget(backup_now_btn)
         backup_layout.addLayout(bk_row)
 
-        # Schedule
         sched_row = QHBoxLayout()
         sched_row.addWidget(QLabel("Auto-backup:"))
         self.backup_schedule = QComboBox()
@@ -136,7 +144,6 @@ class SettingsView(QWidget):
         sched_row.addStretch()
         backup_layout.addLayout(sched_row)
 
-        # Import/Export local
         io_row = QHBoxLayout()
         export_local_btn = QPushButton("Export Backup (.zip)")
         export_local_btn.clicked.connect(self._export_local)
@@ -152,79 +159,148 @@ class SettingsView(QWidget):
 
         layout.addWidget(backup_group)
         layout.addStretch()
-
         scroll.setWidget(content)
 
-    def _build_platform_row(self, platform: str) -> dict:
-        label = PLATFORM_DISPLAY[platform]
+    # ── Platform row builders ─────────────────────────────────────────────
+
+    def _build_ebay_row(self) -> dict:
+        """eBay uses API key credentials, tested via OAuth token request."""
         container = QFrame()
         container.setObjectName("platformRow")
-        row_layout = QHBoxLayout(container)
-        row_layout.setContentsMargins(8, 8, 8, 8)
+        row = QHBoxLayout(container)
+        row.setContentsMargins(10, 10, 10, 10)
 
-        name_lbl = QLabel(label)
+        name_lbl = QLabel("eBay")
         name_lbl.setFixedWidth(90)
-        row_layout.addWidget(name_lbl)
+        row.addWidget(name_lbl)
 
-        status_dot = QLabel("●")
-        status_dot.setFixedWidth(20)
-        status_dot.setObjectName("statusDotUnknown")
-        row_layout.addWidget(status_dot)
+        dot = QLabel("●")
+        dot.setObjectName("statusDotUnknown")
+        dot.setFixedWidth(20)
+        row.addWidget(dot)
 
         status_lbl = QLabel("Not configured")
-        status_lbl.setFixedWidth(200)
-        row_layout.addWidget(status_lbl)
+        status_lbl.setMinimumWidth(180)
+        row.addWidget(status_lbl)
 
-        last_sync = QLabel("")
-        row_layout.addWidget(last_sync)
-        row_layout.addStretch()
+        last_lbl = QLabel("")
+        last_lbl.setStyleSheet("color:#585b70; font-size:11px;")
+        row.addWidget(last_lbl)
+        row.addStretch()
 
-        if platform == "ebay":
-            id_edit = QLineEdit()
-            id_edit.setPlaceholderText("Client ID")
-            id_edit.setFixedWidth(160)
-            id_edit.setEchoMode(QLineEdit.Password)
-            secret_edit = QLineEdit()
-            secret_edit.setPlaceholderText("Client Secret")
-            secret_edit.setFixedWidth(160)
-            secret_edit.setEchoMode(QLineEdit.Password)
-            row_layout.addWidget(id_edit)
-            row_layout.addWidget(secret_edit)
-            save_btn = QPushButton("Save")
-            save_btn.clicked.connect(lambda: self._save_ebay_creds(id_edit.text(), secret_edit.text()))
-            row_layout.addWidget(save_btn)
-        else:
-            email_edit = QLineEdit()
-            email_edit.setPlaceholderText("Email")
-            email_edit.setFixedWidth(160)
-            pw_edit = QLineEdit()
-            pw_edit.setPlaceholderText("Password")
-            pw_edit.setEchoMode(QLineEdit.Password)
-            pw_edit.setFixedWidth(130)
-            row_layout.addWidget(email_edit)
-            row_layout.addWidget(pw_edit)
-            save_btn = QPushButton("Save")
-            save_btn.clicked.connect(lambda p=platform, e=email_edit, pw=pw_edit:
-                                     self._save_platform_creds(p, e.text(), pw.text()))
-            row_layout.addWidget(save_btn)
+        id_edit = QLineEdit()
+        id_edit.setPlaceholderText("Client ID")
+        id_edit.setEchoMode(QLineEdit.Password)
+        id_edit.setFixedWidth(150)
+        row.addWidget(id_edit)
+
+        secret_edit = QLineEdit()
+        secret_edit.setPlaceholderText("Client Secret")
+        secret_edit.setEchoMode(QLineEdit.Password)
+        secret_edit.setFixedWidth(150)
+        row.addWidget(secret_edit)
+
+        save_btn = QPushButton("Save")
+        save_btn.clicked.connect(lambda: self._save_ebay_creds(id_edit.text(), secret_edit.text()))
+        row.addWidget(save_btn)
 
         test_btn = QPushButton("Test")
-        test_btn.clicked.connect(lambda p=platform, sl=status_lbl, sd=status_dot:
-                                 self._test_platform(p, sl, sd))
-        row_layout.addWidget(test_btn)
+        test_btn.clicked.connect(lambda: self._test_platform_async("ebay", status_lbl, dot))
+        row.addWidget(test_btn)
+
+        sync_btn = QPushButton("Sync")
+        sync_btn.clicked.connect(lambda: self._sync_platform("ebay"))
+        row.addWidget(sync_btn)
+
+        return {"widget": container, "status_label": status_lbl,
+                "status_dot": dot, "last_sync": last_lbl}
+
+    def _build_browser_row(self, platform: str) -> dict:
+        """Mercari / Poshmark — browser-based auth (email/pass or Google SSO)."""
+        label = PLATFORM_DISPLAY[platform]
+
+        container = QFrame()
+        container.setObjectName("platformRow")
+        col = QVBoxLayout(container)
+        col.setContentsMargins(10, 10, 10, 10)
+        col.setSpacing(6)
+
+        # Top row: status
+        top = QHBoxLayout()
+        name_lbl = QLabel(label)
+        name_lbl.setFixedWidth(90)
+        top.addWidget(name_lbl)
+
+        dot = QLabel("●")
+        dot.setObjectName("statusDotUnknown")
+        dot.setFixedWidth(20)
+        top.addWidget(dot)
+
+        status_lbl = QLabel("Not logged in")
+        status_lbl.setMinimumWidth(200)
+        top.addWidget(status_lbl)
+
+        last_lbl = QLabel("")
+        last_lbl.setStyleSheet("color:#585b70; font-size:11px;")
+        top.addWidget(last_lbl)
+        top.addStretch()
+        col.addLayout(top)
+
+        # Bottom row: optional credential pre-fill + action buttons
+        bot = QHBoxLayout()
+        bot.addSpacing(110)  # indent to align under status
+
+        email_edit = QLineEdit()
+        email_edit.setPlaceholderText("Email (optional pre-fill)")
+        email_edit.setFixedWidth(180)
+        bot.addWidget(email_edit)
+
+        pw_edit = QLineEdit()
+        pw_edit.setPlaceholderText("Password (optional)")
+        pw_edit.setEchoMode(QLineEdit.Password)
+        pw_edit.setFixedWidth(140)
+        bot.addWidget(pw_edit)
+
+        save_btn = QPushButton("Save")
+        save_btn.setToolTip("Save email/password for browser auto-fill")
+        save_btn.clicked.connect(
+            lambda p=platform, e=email_edit, pw=pw_edit:
+            self._save_platform_creds(p, e.text(), pw.text())
+        )
+        bot.addWidget(save_btn)
+
+        login_btn = QPushButton("Login with Browser")
+        login_btn.setObjectName("primaryButton")
+        login_btn.setToolTip(
+            "Opens a browser window — log in with email/password or 'Continue with Google'"
+        )
+        login_btn.clicked.connect(
+            lambda p=platform, sl=status_lbl, sd=dot, lb=login_btn:
+            self._browser_login(p, sl, sd, lb)
+        )
+        bot.addWidget(login_btn)
+
+        test_btn = QPushButton("Test")
+        test_btn.clicked.connect(lambda p=platform, sl=status_lbl, sd=dot:
+                                 self._test_platform_async(p, sl, sd))
+        bot.addWidget(test_btn)
 
         sync_btn = QPushButton("Sync")
         sync_btn.clicked.connect(lambda p=platform: self._sync_platform(p))
-        row_layout.addWidget(sync_btn)
+        bot.addWidget(sync_btn)
 
-        return {
-            "widget": container,
-            "status_label": status_lbl,
-            "status_dot": status_dot,
-            "last_sync": last_sync,
-        }
+        logout_btn = QPushButton("Log Out")
+        logout_btn.clicked.connect(
+            lambda p=platform, sl=status_lbl, sd=dot: self._logout_platform(p, sl, sd)
+        )
+        bot.addWidget(logout_btn)
 
-    # ── Data loading ──────────────────────────────────────────────────────
+        col.addLayout(bot)
+
+        return {"widget": container, "status_label": status_lbl,
+                "status_dot": dot, "last_sync": last_lbl}
+
+    # ── Settings loading ──────────────────────────────────────────────────
 
     def _load_settings(self):
         last = get_setting("last_sync_time", "Never")
@@ -232,7 +308,14 @@ class SettingsView(QWidget):
 
         for p, row in self._platform_rows.items():
             last_p = get_setting(f"last_sync_{p}", "")
-            row["last_sync"].setText(f"Last: {last_p}" if last_p else "")
+            row["last_sync"].setText(f"Last synced: {last_p}" if last_p else "")
+
+            # Reflect session state for browser-auth platforms
+            if p in ("mercari", "poshmark"):
+                svc = self._get_service(p)
+                if svc.has_session():
+                    self._set_dot(row["status_dot"], "ok")
+                    row["status_label"].setText("Session saved — ready to sync")
 
         sched = get_setting("backup_schedule", "Disabled")
         idx = self.backup_schedule.findText(sched)
@@ -246,58 +329,125 @@ class SettingsView(QWidget):
         if os.path.exists(token):
             self.gdrive_status.setText("Google Drive: Connected")
 
-    # ── Platform actions ──────────────────────────────────────────────────
+    # ── Platform helpers ──────────────────────────────────────────────────
+
+    @staticmethod
+    def _get_service(platform: str):
+        if platform == "ebay":
+            from app.services.ebay_service import EbayService
+            return EbayService()
+        if platform == "mercari":
+            from app.services.mercari_service import MercariService
+            return MercariService()
+        from app.services.poshmark_service import PoshmarkService
+        return PoshmarkService()
+
+    def _set_dot(self, dot: QLabel, state: str):
+        name = {"ok": "statusDotOk", "error": "statusDotError"}.get(state, "statusDotUnknown")
+        dot.setObjectName(name)
+        dot.style().unpolish(dot)
+        dot.style().polish(dot)
+        dot.update()
+
+    # ── Credential save ───────────────────────────────────────────────────
 
     def _save_ebay_creds(self, client_id: str, secret: str):
         if not client_id or not secret:
-            QMessageBox.warning(self, "eBay", "Please enter both Client ID and Client Secret.")
+            QMessageBox.warning(self, "eBay", "Enter both Client ID and Client Secret.")
             return
         from app.services.ebay_service import EbayService
         EbayService().save_credentials(client_id, secret)
         QMessageBox.information(self, "eBay", "Credentials saved.")
 
     def _save_platform_creds(self, platform: str, email: str, password: str):
-        if not email or not password:
-            QMessageBox.warning(self, platform.capitalize(), "Please enter email and password.")
-            return
-        if platform == "mercari":
-            from app.services.mercari_service import MercariService
-            MercariService().save_credentials(email, password)
+        svc = self._get_service(platform)
+        svc.save_credentials(email, password)
+        QMessageBox.information(
+            self, PLATFORM_DISPLAY[platform],
+            "Credentials saved for browser auto-fill.\n"
+            "Click 'Login with Browser' to authenticate."
+        )
+
+    # ── Browser login ─────────────────────────────────────────────────────
+
+    def _browser_login(self, platform: str, status_lbl: QLabel,
+                       dot: QLabel, login_btn: QPushButton):
+        login_btn.setEnabled(False)
+        login_btn.setText("Browser open…")
+        status_lbl.setText("Complete login in the browser window…")
+        self._set_dot(dot, "unknown")
+
+        svc = self._get_service(platform)
+
+        def _done(ok: bool, err: str | None):
+            QTimer.singleShot(0, lambda: self._on_browser_login_done(
+                ok, err, platform, status_lbl, dot, login_btn
+            ))
+
+        svc.login_browser(done_cb=_done)
+
+    def _on_browser_login_done(self, ok: bool, err: str | None, platform: str,
+                               status_lbl: QLabel, dot: QLabel, login_btn: QPushButton):
+        login_btn.setEnabled(True)
+        login_btn.setText("Login with Browser")
+        if ok:
+            self._set_dot(dot, "ok")
+            status_lbl.setText("Logged in — session saved")
+            self._platform_rows[platform]["last_sync"].setText("")
         else:
-            from app.services.poshmark_service import PoshmarkService
-            PoshmarkService().save_credentials(email, password)
-        QMessageBox.information(self, platform.capitalize(), "Credentials saved.")
+            self._set_dot(dot, "error")
+            status_lbl.setText("Login failed")
+            QMessageBox.critical(
+                self, f"{PLATFORM_DISPLAY[platform]} Login Failed",
+                f"Could not complete login:\n\n{err}"
+            )
 
-    def _test_platform(self, platform: str, status_lbl: QLabel, status_dot: QLabel):
+    def _logout_platform(self, platform: str, status_lbl: QLabel, dot: QLabel):
+        svc = self._get_service(platform)
+        if hasattr(svc, "clear_session"):
+            svc.clear_session()
+        self._set_dot(dot, "unknown")
+        status_lbl.setText("Logged out")
+
+    # ── Test (runs in background thread, shows popup with result) ─────────
+
+    def _test_platform_async(self, platform: str, status_lbl: QLabel, dot: QLabel):
         status_lbl.setText("Testing…")
-        try:
-            if platform == "ebay":
-                from app.services.ebay_service import EbayService
-                ok, msg = EbayService().test_connection()
-            elif platform == "mercari":
-                from app.services.mercari_service import MercariService
-                ok, msg = MercariService().test_connection()
-            else:
-                from app.services.poshmark_service import PoshmarkService
-                ok, msg = PoshmarkService().test_connection()
-        except Exception as e:
-            ok, msg = False, str(e)
+        self._set_dot(dot, "unknown")
 
+        def _run():
+            svc = self._get_service(platform)
+            try:
+                ok, msg = svc.test_connection()
+            except Exception as e:
+                ok, msg = False, str(e)
+            QTimer.singleShot(0, lambda: self._on_test_done(ok, msg, platform, status_lbl, dot))
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _on_test_done(self, ok: bool, msg: str, platform: str,
+                      status_lbl: QLabel, dot: QLabel):
+        self._set_dot(dot, "ok" if ok else "error")
         status_lbl.setText(msg)
-        status_dot.setObjectName("statusDotOk" if ok else "statusDotError")
-        status_dot.style().unpolish(status_dot)
-        status_dot.style().polish(status_dot)
+        icon = QMessageBox.Information if ok else QMessageBox.Warning
+        QMessageBox.information(self, f"{PLATFORM_DISPLAY[platform]} — Connection Test",
+                                f"{'✓ ' if ok else '✗ '}{msg}") if ok else \
+        QMessageBox.warning(self, f"{PLATFORM_DISPLAY[platform]} — Connection Test",
+                            f"✗ {msg}")
+
+    # ── Sync ──────────────────────────────────────────────────────────────
 
     def _sync_platform(self, platform: str):
         self.sync_btn.setEnabled(False)
         self.sync_progress.show()
         self.sync_progress.setRange(0, 0)
-        self.sync_status.setText(f"Syncing {platform}…")
+        self.sync_status.setText(f"Syncing {PLATFORM_DISPLAY[platform]}…")
 
         from app.services.sync_service import sync_platform
         sync_platform(
             platform,
-            done_cb=lambda ok, count, err: QTimer.singleShot(0, lambda: self._on_sync_done(ok, count, err))
+            done_cb=lambda ok, count, err:
+            QTimer.singleShot(0, lambda: self._on_sync_done(ok, count, err))
         )
 
     def _force_sync(self):
@@ -307,12 +457,15 @@ class SettingsView(QWidget):
         self.sync_status.setText("Syncing all platforms…")
 
         from app.services.sync_service import sync_all
-        sync_all(done_cb=lambda total, errors: QTimer.singleShot(0, lambda: self._on_all_sync_done(total, errors)))
+        sync_all(done_cb=lambda total, errors:
+                 QTimer.singleShot(0, lambda: self._on_all_sync_done(total, errors)))
 
     def _on_sync_done(self, ok: bool, count: int, err: str | None):
         self.sync_btn.setEnabled(True)
         self.sync_progress.hide()
         self.sync_status.setText(f"Synced {count} listing(s)." if ok else f"Error: {err}")
+        if not ok:
+            QMessageBox.warning(self, "Sync Error", f"Sync failed:\n\n{err}")
         self._load_settings()
 
     def _on_all_sync_done(self, total: int, errors: list):
@@ -320,22 +473,23 @@ class SettingsView(QWidget):
         self.sync_progress.hide()
         msg = f"Sync complete: {total} listing(s)."
         if errors:
-            msg += " Errors: " + "; ".join(errors)
-        self.sync_status.setText(msg)
+            msg += "\n\nErrors:\n" + "\n".join(errors)
+            QMessageBox.warning(self, "Sync Complete with Errors", msg)
+        else:
+            self.sync_status.setText(msg)
         self._load_settings()
 
-    # ── Update actions ────────────────────────────────────────────────────
+    # ── Update ────────────────────────────────────────────────────────────
 
     def _check_update(self):
         self.update_btn.setEnabled(False)
         self.update_status.setText("Checking…")
 
         def _check():
-            from app.services.updater_service import check_for_update, get_latest_release
+            from app.services.updater_service import check_for_update
             available, latest = check_for_update()
             QTimer.singleShot(0, lambda: self._on_update_check(available, latest))
 
-        import threading
         threading.Thread(target=_check, daemon=True).start()
 
     def _on_update_check(self, available: bool, latest: str):
@@ -380,7 +534,7 @@ class SettingsView(QWidget):
         download_and_apply_update(zip_asset["browser_download_url"],
                                   progress_cb=_progress, done_cb=_done)
 
-    # ── Backup actions ────────────────────────────────────────────────────
+    # ── Backup ────────────────────────────────────────────────────────────
 
     def _connect_gdrive(self):
         try:
@@ -400,7 +554,8 @@ class SettingsView(QWidget):
             self.backup_status.setText("Uploading to Google Drive…")
             upload_backup_to_drive(
                 tmp,
-                done_cb=lambda ok, err: QTimer.singleShot(0, lambda: self._on_backup_done(ok, err))
+                done_cb=lambda ok, err:
+                QTimer.singleShot(0, lambda: self._on_backup_done(ok, err))
             )
         except Exception as e:
             self.backup_status.setText(f"Backup failed: {e}")
