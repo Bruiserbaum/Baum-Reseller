@@ -1,5 +1,5 @@
 #define MyAppName      "Baum Reseller"
-#define MyAppVersion   "1.0.0"
+#define MyAppVersion   "1.1.0"
 #define MyAppPublisher "Bruiserbaum"
 #define MyAppURL       "https://github.com/Bruiserbaum/Baum-Reseller"
 #define MyAppExeName   "BaumReseller.exe"

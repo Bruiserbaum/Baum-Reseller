@@ -486,15 +486,25 @@ class SettingsView(QWidget):
         self.update_status.setText("Checking…")
 
         def _check():
-            from app.services.updater_service import check_for_update
-            available, latest = check_for_update()
-            QTimer.singleShot(0, lambda: self._on_update_check(available, latest))
+            available, latest, error = False, VERSION, None
+            try:
+                from app.services.updater_service import check_for_update
+                available, latest = check_for_update()
+            except Exception as e:
+                error = str(e)
+            finally:
+                # Always fires — even if an exception was raised
+                QTimer.singleShot(0, lambda: self._on_update_check(available, latest, error))
 
         threading.Thread(target=_check, daemon=True).start()
 
-    def _on_update_check(self, available: bool, latest: str):
+    def _on_update_check(self, available: bool, latest: str, error: str | None):
         self.update_btn.setEnabled(True)
-        if available:
+        if error:
+            self.update_status.setText("Could not check for updates.")
+            QMessageBox.warning(self, "Update Check Failed",
+                                f"Could not reach GitHub:\n\n{error}")
+        elif available:
             self.update_status.setText(f"Update available: v{latest}")
             reply = QMessageBox.question(
                 self, "Update Available",
