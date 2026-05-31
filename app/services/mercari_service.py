@@ -69,18 +69,26 @@ class MercariService:
         try:
             keyring.set_password(SERVICE, "credentials",
                                  json.dumps({"email": email, "password": password}))
+            from app.utils.config import set_value
+            set_value("mercari_email", email)
             return None
         except Exception as e:
             return str(e)
 
     def has_session(self) -> bool:
         cookies = os.path.join(PROFILE_DIR, "Default", "Cookies")
-        return os.path.exists(PROFILE_DIR) and os.path.exists(cookies)
+        if os.path.exists(PROFILE_DIR) and os.path.exists(cookies):
+            return True
+        legacy = os.path.join(os.path.expanduser("~"), ".baum-reseller", "mercari_state.json")
+        return os.path.exists(legacy)
 
     def clear_session(self):
         import shutil
         if os.path.exists(PROFILE_DIR):
             shutil.rmtree(PROFILE_DIR, ignore_errors=True)
+        legacy = os.path.join(os.path.expanduser("~"), ".baum-reseller", "mercari_state.json")
+        if os.path.exists(legacy):
+            os.remove(legacy)
 
     # ── Browser login ─────────────────────────────────────────────────────
 

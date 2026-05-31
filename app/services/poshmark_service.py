@@ -76,19 +76,35 @@ class PoshmarkService:
         try:
             keyring.set_password(SERVICE, "credentials",
                                  json.dumps({"email": email, "password": password}))
+            # Also persist email (non-sensitive) in config.json so it survives reinstalls
+            from app.utils.config import set_value
+            set_value("poshmark_email", email)
             return None
         except Exception as e:
             return str(e)
 
     def has_session(self) -> bool:
-        """Session exists when the persistent profile has been written to disk."""
+        """
+        Session exists if the persistent profile has been written to disk.
+        Also accepts the legacy poshmark_state.json from v1.1.x so users
+        who authenticated before v1.1.2 aren't forced to re-login.
+        """
+        # Current: persistent Chrome profile
         cookies = os.path.join(PROFILE_DIR, "Default", "Cookies")
-        return os.path.exists(PROFILE_DIR) and os.path.exists(cookies)
+        if os.path.exists(PROFILE_DIR) and os.path.exists(cookies):
+            return True
+        # Legacy (v1.1.1 and earlier): storage_state JSON file
+        legacy = os.path.join(os.path.expanduser("~"), ".baum-reseller", "poshmark_state.json")
+        return os.path.exists(legacy)
 
     def clear_session(self):
         import shutil
         if os.path.exists(PROFILE_DIR):
             shutil.rmtree(PROFILE_DIR, ignore_errors=True)
+        # Also remove legacy state file if present
+        legacy = os.path.join(os.path.expanduser("~"), ".baum-reseller", "poshmark_state.json")
+        if os.path.exists(legacy):
+            os.remove(legacy)
 
     # ── Browser login ─────────────────────────────────────────────────────
 

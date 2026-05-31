@@ -159,6 +159,20 @@ class SettingsView(QWidget):
         backup_layout.addWidget(self.backup_status)
 
         layout.addWidget(backup_group)
+
+        # ── Data Location Notice ──────────────────────────────────────────
+        data_dir = os.path.join(os.path.expanduser("~"), ".baum-reseller")
+        data_notice = QLabel(
+            f"🔒  Your data (database, credentials, browser sessions) is stored at:\n"
+            f"    {data_dir}\n"
+            f"    This folder is NOT modified by app reinstalls or updates — your settings are always preserved."
+        )
+        data_notice.setWordWrap(True)
+        data_notice.setStyleSheet(
+            "color: #a6adc8; font-size: 11px; "
+            "background: #252535; border-radius: 6px; padding: 10px;"
+        )
+        layout.addWidget(data_notice)
         layout.addStretch()
         scroll.setWidget(content)
 
@@ -299,11 +313,14 @@ class SettingsView(QWidget):
         col.addLayout(bot)
 
         return {"widget": container, "status_label": status_lbl,
-                "status_dot": dot, "last_sync": last_lbl}
+                "status_dot": dot, "last_sync": last_lbl,
+                "email_edit": email_edit, "pw_edit": pw_edit}
 
     # ── Settings loading ──────────────────────────────────────────────────
 
     def _load_settings(self):
+        from app.utils.config import get as cfg_get
+
         last = get_setting("last_sync_time", "Never")
         self.last_sync_label.setText(f"Last sync: {last}")
 
@@ -311,9 +328,22 @@ class SettingsView(QWidget):
             last_p = get_setting(f"last_sync_{p}", "")
             row["last_sync"].setText(f"Last synced: {last_p}" if last_p else "")
 
-            # Reflect session state for browser-auth platforms
             if p in ("mercari", "poshmark"):
                 svc = self._get_service(p)
+
+                # Pre-populate email field from config.json (survives reinstalls)
+                saved_email = cfg_get(f"{p}_email", "")
+                if saved_email and "email_edit" in row:
+                    row["email_edit"].setPlaceholderText(saved_email)
+
+                # Also try keyring for full credential pre-fill
+                try:
+                    creds = svc.get_credentials()
+                    if creds.get("email") and "email_edit" in row:
+                        row["email_edit"].setText(creds["email"])
+                except Exception:
+                    pass
+
                 if svc.has_session():
                     self._set_dot(row["status_dot"], "ok")
                     row["status_label"].setText("Session saved — ready to sync")
