@@ -1,165 +1,117 @@
 """
 Platform browser utilities.
 
-Login  — launches Chrome/Edge via subprocess with ZERO Playwright automation
-flags. The user sees a completely normal browser. Google SSO, 2FA, and all
-platform auth flows work exactly as they do in their everyday browser.
+Login  — uses Playwright's own launch() with the actual Chrome or Edge binary
+(channel="chrome" / "msedge"). Playwright creates an isolated process so there
+are no Chrome singleton issues and no "Restore pages" dialogs from previous
+sessions. Automation detection flags are stripped so Google SSO and 2FA work.
 
-Sync   — uses a saved storage_state JSON (cookies) with a headless Playwright
-context. No automation detection needed for headless data scraping.
+Sync   — headless Playwright context loaded from a saved storage_state JSON.
 """
 import os
-import socket
-import subprocess
 import threading
-import time
-import urllib.request
+
+# Script injected into every login page to hide automation fingerprints
+_ANTI_DETECT = """
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    Object.defineProperty(navigator, 'plugins',   { get: () => [1, 2, 3, 4, 5] });
+    window.chrome = { runtime: {} };
+"""
+
+_LAUNCH_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+    "--no-sandbox",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-infobars",
+    "--start-maximized",
+    "--disable-features=ChromeWhatsNewUI,TranslateUI",
+    "--disable-session-crashed-bubble",
+]
+
+_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
 
 
-# ── Browser discovery ─────────────────────────────────────────────────────
+# ── Headed browser for login ──────────────────────────────────────────────
 
-def find_browser_exe() -> str | None:
-    """Return the first Chrome or Edge executable found on this machine."""
-    candidates = [
-        # Chrome — user install
-        os.path.join(os.environ.get("LOCALAPPDATA", ""),
-                     "Google", "Chrome", "Application", "chrome.exe"),
-        # Chrome — machine install
-        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-        # Edge (always present on Windows 10/11)
-        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-    ]
-    for path in candidates:
-        if os.path.exists(path):
-            return path
-    return None
-
-
-# ── Helpers ───────────────────────────────────────────────────────────────
-
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("", 0))
-        return s.getsockname()[1]
-
-
-def _wait_for_cdp(port: int, timeout: float = 20.0) -> bool:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+def _launch_headed(playwright):
+    """
+    Launch a headed browser for interactive login.
+    Tries Chrome → Edge → Playwright's Chromium.
+    All automation-related flags are stripped.
+    """
+    for channel in ("chrome", "msedge", None):
         try:
-            urllib.request.urlopen(f"http://localhost:{port}/json", timeout=1)
-            return True
+            kwargs = dict(
+                headless=False,
+                args=_LAUNCH_ARGS,
+                ignore_default_args=["--enable-automation"],
+            )
+            if channel:
+                kwargs["channel"] = channel
+            return playwright.chromium.launch(**kwargs)
         except Exception:
-            time.sleep(0.4)
-    return False
+            continue
+    raise RuntimeError(
+        "No browser found (Chrome, Edge, or Playwright Chromium).\n"
+        "Install Chrome or run:  py -m playwright install chromium"
+    )
 
-
-# ── Headed login (subprocess + CDP) ──────────────────────────────────────
 
 def launch_login_window(
     login_url: str,
-    profile_dir: str,
+    profile_dir: str,   # kept for API compatibility; not used in this approach
     is_logged_in,       # callable(url: str) -> bool
     state_file: str,
     done_cb=None,
 ):
     """
-    Launch Chrome/Edge as a real OS process (no Playwright injected flags),
-    connect via CDP to detect login completion, then save cookies to
-    state_file and close the browser.
+    Open a headed browser, navigate to login_url, and wait for the user to
+    complete authentication (including 2FA). Saves cookies to state_file
+    and closes the browser.
 
-    The user interacts with a completely normal browser — Google SSO, 2FA,
-    SMS codes, authenticator apps — all work exactly as usual.
+    Uses Playwright's own process management — no Chrome singleton issues.
     """
     def _worker():
         ok, err = False, None
-        proc = None
         try:
             from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-            exe = find_browser_exe()
-            if not exe:
-                raise RuntimeError(
-                    "Google Chrome or Microsoft Edge is required for platform login.\n"
-                    "Please install Chrome: https://www.google.com/chrome/"
-                )
-
-            port = _free_port()
-            os.makedirs(profile_dir, exist_ok=True)
-
-            # Launch as a completely normal browser process — no Playwright flags.
-            # --new-window forces a fresh window even if Chrome is already running.
-            CREATE_NO_WINDOW = 0x08000000
-            proc = subprocess.Popen(
-                [
-                    exe,
-                    f"--remote-debugging-port={port}",
-                    f"--user-data-dir={profile_dir}",
-                    "--no-first-run",
-                    "--no-default-browser-check",
-                    "--disable-infobars",
-                    "--start-maximized",
-                    "--new-window",
-                    "--disable-session-crashed-bubble",
-                    "--disable-features=ChromeWhatsNewUI",
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=CREATE_NO_WINDOW,
-            )
-
-            if not _wait_for_cdp(port):
-                raise RuntimeError(
-                    "Browser did not start in time. "
-                    "Make sure Chrome or Edge is installed and not blocked by antivirus."
-                )
-
             with sync_playwright() as p:
-                browser = p.chromium.connect_over_cdp(f"http://localhost:{port}")
+                browser = _launch_headed(p)
 
-                ctx = browser.contexts[0] if browser.contexts else None
-                if ctx is None:
-                    raise RuntimeError("Could not connect to browser context.")
+                ctx = browser.new_context(user_agent=_USER_AGENT)
+                page = ctx.new_page()
+                page.add_init_script(_ANTI_DETECT)
 
-                # Get or create a tab, then ALWAYS navigate to the correct login URL.
-                # (Without this, an existing tab from a previous session would be
-                # reused without navigating away — causing the wrong site to appear.)
-                for _ in range(10):
-                    if ctx.pages:
-                        break
-                    time.sleep(0.5)
-
-                page = ctx.pages[0] if ctx.pages else ctx.new_page()
-
-                # Always navigate — this is the fix for "all buttons open Poshmark"
                 page.goto(login_url, wait_until="domcontentloaded", timeout=30_000)
                 page.bring_to_front()
 
-                # Wait for user to finish login (including 2FA).
-                # The browser stays open until they reach a post-auth page.
                 try:
                     page.wait_for_url(is_logged_in, timeout=300_000)
                 except PWTimeout:
                     raise RuntimeError(
-                        "Login timed out (5 minutes). "
-                        "If two-factor authentication was required, complete it in the "
-                        "browser window and wait for the home page to finish loading."
+                        "Login timed out (5 minutes). If two-factor authentication "
+                        "was required, complete it in the browser window and wait "
+                        "for the home page to finish loading."
                     )
 
-                # Save cookies so future headless syncs can reuse the session
+                os.makedirs(os.path.dirname(state_file), exist_ok=True)
                 ctx.storage_state(path=state_file)
+                browser.close()
                 ok = True
 
         except Exception as e:
-            err = str(e)
+            raw = str(e)
+            if any(w in raw.lower() for w in ("closed", "target", "detached")):
+                err = "Login cancelled — the browser window was closed."
+            else:
+                err = raw
         finally:
-            if proc:
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
             if done_cb:
                 from app.utils.qt_thread import post_to_main
                 post_to_main(lambda: done_cb(ok, err))
@@ -167,7 +119,7 @@ def launch_login_window(
     threading.Thread(target=_worker, daemon=True).start()
 
 
-# ── Headless sync context ─────────────────────────────────────────────────
+# ── Headless context for sync ─────────────────────────────────────────────
 
 def headless_context(playwright, state_file: str):
     """
@@ -180,10 +132,6 @@ def headless_context(playwright, state_file: str):
     )
     ctx = browser.new_context(
         storage_state=state_file,
-        user_agent=(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
+        user_agent=_USER_AGENT,
     )
     return browser, ctx
