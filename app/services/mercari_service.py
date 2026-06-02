@@ -115,14 +115,23 @@ class MercariService:
                         except Exception:
                             pass
 
+                    # Wait for a known post-login page — NOT just "not /login"
+                    # because 2FA/OTP pages also satisfy that condition.
+                    _BLOCKED = ("/login", "/register", "/verify", "/otp",
+                                "/two-step", "/2fa", "/confirm", "/auth/")
+
                     try:
                         page.wait_for_url(
-                            lambda url: "mercari.com" in url and "/login" not in url,
-                            timeout=180_000
+                            lambda url: (
+                                "mercari.com" in url and
+                                not any(x in url for x in _BLOCKED)
+                            ),
+                            timeout=300_000   # 5 min — extra time for 2FA
                         )
                     except PWTimeout:
                         raise RuntimeError(
-                            "Login window timed out (3 min) without a successful sign-in."
+                            "Login timed out. If two-factor authentication was required, "
+                            "make sure to complete it in the browser window."
                         )
 
                     ctx.close()

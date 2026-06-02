@@ -46,15 +46,15 @@ class SettingsView(QWidget):
         conn_layout = QVBoxLayout(conn_group)
 
         note = QLabel(
-            "eBay uses API keys. Mercari and Poshmark use browser-based login — "
-            "works with email/password or Google Sign-In."
+            "All platforms use browser-based login — sign in with email/password or Google. "
+            "Two-factor authentication is supported. The browser stays open until you reach the home page."
         )
         note.setWordWrap(True)
         note.setStyleSheet("color: #a6adc8; font-size: 11px;")
         conn_layout.addWidget(note)
 
         self._platform_rows: dict[str, dict] = {}
-        self._platform_rows["ebay"]     = self._build_ebay_row()
+        self._platform_rows["ebay"]     = self._build_browser_row("ebay")
         self._platform_rows["mercari"]  = self._build_browser_row("mercari")
         self._platform_rows["poshmark"] = self._build_browser_row("poshmark")
 
@@ -328,7 +328,7 @@ class SettingsView(QWidget):
             last_p = get_setting(f"last_sync_{p}", "")
             row["last_sync"].setText(f"Last synced: {last_p}" if last_p else "")
 
-            if p in ("mercari", "poshmark"):
+            if p in ("ebay", "mercari", "poshmark"):
                 svc = self._get_service(p)
 
                 # Pre-populate email field from config.json (survives reinstalls)
@@ -411,7 +411,7 @@ class SettingsView(QWidget):
                        dot: QLabel, login_btn: QPushButton):
         login_btn.setEnabled(False)
         login_btn.setText("Browser open…")
-        status_lbl.setText("Complete login in the browser window…")
+        status_lbl.setText("Sign in — complete 2FA if prompted, then wait for the home page…")
         self._set_dot(dot, "unknown")
 
         svc = self._get_service(platform)

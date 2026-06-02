@@ -137,14 +137,23 @@ class PoshmarkService:
                         except Exception:
                             pass
 
+                    # Wait for a known post-login page — NOT just "not /login",
+                    # because 2FA pages (/verify-otp, /two-step, etc.) also
+                    # satisfy that condition and would close the browser too early.
+                    _LOGGED_IN = ("/feed", "/news", "/home", "/closet", "/dashboard", "/account")
+
                     try:
                         page.wait_for_url(
-                            lambda url: "poshmark.com" in url and "/login" not in url,
-                            timeout=180_000
+                            lambda url: (
+                                "poshmark.com" in url and
+                                any(path in url for path in _LOGGED_IN)
+                            ),
+                            timeout=300_000   # 5 min — extra time for 2FA
                         )
                     except PWTimeout:
                         raise RuntimeError(
-                            "Login window timed out (3 min) without a successful sign-in."
+                            "Login timed out. If two-factor authentication was required, "
+                            "make sure to complete it in the browser window."
                         )
 
                     ctx.close()
