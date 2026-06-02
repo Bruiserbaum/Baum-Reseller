@@ -89,7 +89,8 @@ def launch_login_window(
             port = _free_port()
             os.makedirs(profile_dir, exist_ok=True)
 
-            # Launch as a completely normal browser process — no Playwright flags
+            # Launch as a completely normal browser process — no Playwright flags.
+            # --new-window forces a fresh window even if Chrome is already running.
             CREATE_NO_WINDOW = 0x08000000
             proc = subprocess.Popen(
                 [
@@ -100,7 +101,9 @@ def launch_login_window(
                     "--no-default-browser-check",
                     "--disable-infobars",
                     "--start-maximized",
-                    login_url,          # Opens as the first tab
+                    "--new-window",
+                    "--disable-session-crashed-bubble",
+                    "--disable-features=ChromeWhatsNewUI",
                 ],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -116,27 +119,26 @@ def launch_login_window(
             with sync_playwright() as p:
                 browser = p.chromium.connect_over_cdp(f"http://localhost:{port}")
 
-                # Get the existing context (profile-based browser has one by default)
                 ctx = browser.contexts[0] if browser.contexts else None
                 if ctx is None:
                     raise RuntimeError("Could not connect to browser context.")
 
-                # Find the login page tab (it was opened via command-line arg)
-                page = None
-                for _ in range(10):   # wait up to 5 s for the tab to appear
-                    pages = ctx.pages
-                    if pages:
-                        page = pages[0]
+                # Get or create a tab, then ALWAYS navigate to the correct login URL.
+                # (Without this, an existing tab from a previous session would be
+                # reused without navigating away — causing the wrong site to appear.)
+                for _ in range(10):
+                    if ctx.pages:
                         break
                     time.sleep(0.5)
 
-                if page is None:
-                    page = ctx.new_page()
-                    page.goto(login_url, wait_until="domcontentloaded", timeout=20_000)
+                page = ctx.pages[0] if ctx.pages else ctx.new_page()
 
+                # Always navigate — this is the fix for "all buttons open Poshmark"
+                page.goto(login_url, wait_until="domcontentloaded", timeout=30_000)
                 page.bring_to_front()
 
-                # Wait for user to finish login (including 2FA)
+                # Wait for user to finish login (including 2FA).
+                # The browser stays open until they reach a post-auth page.
                 try:
                     page.wait_for_url(is_logged_in, timeout=300_000)
                 except PWTimeout:

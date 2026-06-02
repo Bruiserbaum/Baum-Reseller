@@ -14,14 +14,13 @@ PROFILE    = os.path.join(os.path.expanduser("~"), ".baum-reseller", "poshmark_p
 LOGIN_URL  = "https://poshmark.com/login"
 FEED_URL   = "https://poshmark.com/feed"
 
-# URLs that indicate a completed post-login page
-_LOGGED_IN = ("/feed", "/news", "/home", "/closet", "/dashboard", "/account")
-# URLs that indicate we're still in an auth flow (2FA, verify, etc.)
-_AUTH      = ("/login", "/verify", "/otp", "/two-step", "/challenge", "/auth/", "/sign")
+# Pages that indicate we are still mid-authentication — keep waiting while on these
+_AUTH = ("/login", "/verify", "/otp", "/two-step", "/challenge", "/auth/", "/sign")
 
 
 def _is_logged_in(url: str) -> bool:
-    return "poshmark.com" in url and any(p in url for p in _LOGGED_IN)
+    """True once we land on any poshmark.com page that isn't an auth/login page."""
+    return "poshmark.com" in url and not any(a in url for a in _AUTH)
 
 
 class PoshmarkService:
