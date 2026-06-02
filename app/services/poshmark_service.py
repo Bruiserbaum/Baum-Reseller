@@ -1,67 +1,27 @@
 """
-Poshmark integration — Playwright browser automation.
-Uses a persistent Chrome/Edge profile so Google Sign-In works and sessions survive
-between app restarts without re-authentication.
+Poshmark integration.
+Login: real Chrome/Edge subprocess — no automation flags, supports Google SSO + 2FA.
+Sync:  headless Playwright using saved session cookies.
 """
 import os
 import re
 import json
-import threading
 import keyring
 
-SERVICE     = "baum-reseller-poshmark"
-PROFILE_DIR = os.path.join(os.path.expanduser("~"), ".baum-reseller", "poshmark_profile")
-LOGIN_URL   = "https://poshmark.com/login"
-FEED_URL    = "https://poshmark.com/feed"
+SERVICE    = "baum-reseller-poshmark"
+SESSION    = os.path.join(os.path.expanduser("~"), ".baum-reseller", "poshmark_session.json")
+PROFILE    = os.path.join(os.path.expanduser("~"), ".baum-reseller", "poshmark_profile")
+LOGIN_URL  = "https://poshmark.com/login"
+FEED_URL   = "https://poshmark.com/feed"
 
-# Script injected into every page to hide automation fingerprints from Google / sites
-_ANTI_DETECT_SCRIPT = """
-    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-    Object.defineProperty(navigator, 'plugins',   { get: () => [1,2,3,4,5] });
-    window.chrome = { runtime: {} };
-"""
+# URLs that indicate a completed post-login page
+_LOGGED_IN = ("/feed", "/news", "/home", "/closet", "/dashboard", "/account")
+# URLs that indicate we're still in an auth flow (2FA, verify, etc.)
+_AUTH      = ("/login", "/verify", "/otp", "/two-step", "/challenge", "/auth/", "/sign")
 
 
-def _launch_persistent_context(playwright, headless: bool):
-    """
-    Launch a persistent browser context (profile survives restarts).
-    Tries Chrome → Edge → Playwright Chromium.
-    Automation detection flags are stripped so Google Sign-In works.
-    """
-    os.makedirs(PROFILE_DIR, exist_ok=True)
-
-    base_kwargs = dict(
-        headless=headless,
-        args=[
-            "--disable-blink-features=AutomationControlled",
-            "--no-sandbox",
-            "--start-maximized",
-        ],
-        ignore_default_args=["--enable-automation"],
-        viewport=None,
-        user_agent=(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-    )
-    if not headless:
-        base_kwargs["slow_mo"] = 50
-
-    last_err = None
-    for channel in ("chrome", "msedge", None):
-        try:
-            kwargs = dict(base_kwargs)
-            if channel:
-                kwargs["channel"] = channel
-            return playwright.chromium.launch_persistent_context(PROFILE_DIR, **kwargs)
-        except Exception as e:
-            last_err = e
-
-    raise RuntimeError(
-        f"No usable browser found (Chrome, Edge, or Playwright Chromium).\n"
-        f"Install Chrome/Edge or run:  py -m playwright install chromium\n\n{last_err}"
-    )
+def _is_logged_in(url: str) -> bool:
+    return "poshmark.com" in url and any(p in url for p in _LOGGED_IN)
 
 
 class PoshmarkService:
@@ -76,7 +36,6 @@ class PoshmarkService:
         try:
             keyring.set_password(SERVICE, "credentials",
                                  json.dumps({"email": email, "password": password}))
-            # Also persist email (non-sensitive) in config.json so it survives reinstalls
             from app.utils.config import set_value
             set_value("poshmark_email", email)
             return None
@@ -84,111 +43,74 @@ class PoshmarkService:
             return str(e)
 
     def has_session(self) -> bool:
-        """
-        Session exists if the persistent profile has been written to disk.
-        Also accepts the legacy poshmark_state.json from v1.1.x so users
-        who authenticated before v1.1.2 aren't forced to re-login.
-        """
-        # Current: persistent Chrome profile
-        cookies = os.path.join(PROFILE_DIR, "Default", "Cookies")
-        if os.path.exists(PROFILE_DIR) and os.path.exists(cookies):
+        if os.path.exists(SESSION):
             return True
-        # Legacy (v1.1.1 and earlier): storage_state JSON file
-        legacy = os.path.join(os.path.expanduser("~"), ".baum-reseller", "poshmark_state.json")
-        return os.path.exists(legacy)
+        # Legacy paths from earlier versions
+        for legacy in (
+            os.path.join(os.path.expanduser("~"), ".baum-reseller", "poshmark_state.json"),
+            os.path.join(PROFILE, "Default", "Cookies"),
+        ):
+            if os.path.exists(legacy):
+                return True
+        return False
 
     def clear_session(self):
         import shutil
-        if os.path.exists(PROFILE_DIR):
-            shutil.rmtree(PROFILE_DIR, ignore_errors=True)
-        # Also remove legacy state file if present
-        legacy = os.path.join(os.path.expanduser("~"), ".baum-reseller", "poshmark_state.json")
-        if os.path.exists(legacy):
-            os.remove(legacy)
+        for path in (SESSION,
+                     os.path.join(os.path.expanduser("~"), ".baum-reseller", "poshmark_state.json")):
+            if os.path.exists(path):
+                os.remove(path)
+        if os.path.exists(PROFILE):
+            shutil.rmtree(PROFILE, ignore_errors=True)
 
-    # ── Browser login ─────────────────────────────────────────────────────
+    # ── Browser login (real browser, no automation flags) ─────────────────
 
     def login_browser(self, done_cb=None):
-        """
-        Open a visible browser with a persistent profile.
-        The user can sign in with email/password OR Google — no automation
-        blocking because webdriver flags are stripped.
-        """
-        def _worker():
-            ok, err = False, None
-            try:
-                from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
-                creds = self.get_credentials()
-
-                with sync_playwright() as p:
-                    ctx  = _launch_persistent_context(p, headless=False)
-                    page = ctx.new_page()
-                    page.add_init_script(_ANTI_DETECT_SCRIPT)
-
-                    page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=30_000)
-                    page.bring_to_front()
-
-                    # Auto-fill email/password if saved (user can still choose Google SSO)
-                    if creds.get("email"):
-                        try:
-                            page.fill('input[id="email_address"]', creds["email"], timeout=3_000)
-                            if creds.get("password"):
-                                page.fill('input[type="password"]', creds["password"], timeout=3_000)
-                        except Exception:
-                            pass
-
-                    # Wait for a known post-login page — NOT just "not /login",
-                    # because 2FA pages (/verify-otp, /two-step, etc.) also
-                    # satisfy that condition and would close the browser too early.
-                    _LOGGED_IN = ("/feed", "/news", "/home", "/closet", "/dashboard", "/account")
-
-                    try:
-                        page.wait_for_url(
-                            lambda url: (
-                                "poshmark.com" in url and
-                                any(path in url for path in _LOGGED_IN)
-                            ),
-                            timeout=300_000   # 5 min — extra time for 2FA
-                        )
-                    except PWTimeout:
-                        raise RuntimeError(
-                            "Login timed out. If two-factor authentication was required, "
-                            "make sure to complete it in the browser window."
-                        )
-
-                    ctx.close()
-                ok = True
-
-            except Exception as e:
-                err = str(e)
-            finally:
-                if done_cb:
-                    from app.utils.qt_thread import post_to_main
-                    post_to_main(lambda: done_cb(ok, err))
-
-        threading.Thread(target=_worker, daemon=True).start()
+        from app.utils.browser import launch_login_window
+        launch_login_window(
+            login_url=LOGIN_URL,
+            profile_dir=PROFILE,
+            is_logged_in=_is_logged_in,
+            state_file=SESSION,
+            done_cb=done_cb,
+        )
 
     # ── Connection test ───────────────────────────────────────────────────
 
     def test_connection(self) -> tuple[bool, str]:
         if not self.has_session():
             return False, "Not logged in — click 'Login with Browser'."
+        # Find the session file that exists
+        session_file = SESSION
+        if not os.path.exists(session_file):
+            legacy = os.path.join(os.path.expanduser("~"), ".baum-reseller", "poshmark_state.json")
+            if os.path.exists(legacy):
+                session_file = legacy
+            else:
+                return False, "Session file missing — click 'Login with Browser'."
         try:
             from playwright.sync_api import sync_playwright
+            from app.utils.browser import headless_context
             with sync_playwright() as p:
-                ctx  = _launch_persistent_context(p, headless=True)
+                browser, ctx = headless_context(p, session_file)
                 page = ctx.new_page()
-                page.add_init_script(_ANTI_DETECT_SCRIPT)
                 page.goto(FEED_URL, wait_until="domcontentloaded", timeout=20_000)
-                url  = page.url
-                ctx.close()
-            if "/login" in url:
+                url = page.url
+                browser.close()
+            if any(a in url for a in _AUTH):
+                self.clear_session()
                 return False, "Session expired — click 'Login with Browser' again."
             return True, "Connected to Poshmark ✓"
         except Exception as e:
             return False, str(e)
 
     # ── Sync ──────────────────────────────────────────────────────────────
+
+    def _get_session_file(self) -> str | None:
+        if os.path.exists(SESSION):
+            return SESSION
+        legacy = os.path.join(os.path.expanduser("~"), ".baum-reseller", "poshmark_state.json")
+        return legacy if os.path.exists(legacy) else None
 
     def _get_username(self, page) -> str:
         for selector in ['a[href*="/closet/"]', '[data-et-name="my_closet"]']:
@@ -210,10 +132,12 @@ class PoshmarkService:
         return ""
 
     def fetch_listings(self, progress_cb=None) -> list[dict]:
-        if not self.has_session():
+        session_file = self._get_session_file()
+        if not session_file:
             raise ValueError("Not logged in to Poshmark. Click 'Login with Browser' first.")
 
         from playwright.sync_api import sync_playwright
+        from app.utils.browser import headless_context
         intercepted: list[dict] = []
 
         def _on_response(response):
@@ -224,22 +148,22 @@ class PoshmarkService:
                     pass
 
         with sync_playwright() as p:
-            ctx  = _launch_persistent_context(p, headless=True)
+            browser, ctx = headless_context(p, session_file)
             page = ctx.new_page()
-            page.add_init_script(_ANTI_DETECT_SCRIPT)
             page.on("response", _on_response)
 
             if progress_cb:
                 progress_cb("Checking Poshmark session…")
 
             page.goto(FEED_URL, wait_until="domcontentloaded", timeout=30_000)
-            if "/login" in page.url:
-                ctx.close()
-                return []
+            if any(a in page.url for a in _AUTH):
+                browser.close()
+                self.clear_session()
+                raise ValueError("Poshmark session expired — please re-authenticate.")
 
             username = self._get_username(page)
             if not username:
-                ctx.close()
+                browser.close()
                 raise ValueError("Could not determine Poshmark username.")
 
             if progress_cb:
@@ -257,7 +181,7 @@ class PoshmarkService:
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 page.wait_for_timeout(1_000)
 
-            ctx.close()
+            browser.close()
 
         return _parse_api_responses(intercepted)
 
