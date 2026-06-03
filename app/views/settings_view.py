@@ -213,7 +213,7 @@ class SettingsView(QWidget):
             "then click Import Session."
         )
         open_btn.clicked.connect(
-            lambda p=platform, sl=status_lbl:
+            lambda checked=False, p=platform, sl=status_lbl:
             self._open_in_browser(p, sl)
         )
         row.addWidget(open_btn)
@@ -225,25 +225,26 @@ class SettingsView(QWidget):
             "You must be logged in to this platform in your browser."
         )
         import_btn.clicked.connect(
-            lambda p=platform, sl=status_lbl, sd=dot, ib=import_btn:
+            lambda checked=False, p=platform, sl=status_lbl, sd=dot, ib=import_btn:
             self._import_session(p, sl, sd, ib)
         )
         row.addWidget(import_btn)
 
         test_btn = QPushButton("Test")
         test_btn.clicked.connect(
-            lambda p=platform, sl=status_lbl, sd=dot:
+            lambda checked=False, p=platform, sl=status_lbl, sd=dot:
             self._test_platform_async(p, sl, sd)
         )
         row.addWidget(test_btn)
 
         sync_btn = QPushButton("Sync")
-        sync_btn.clicked.connect(lambda p=platform: self._sync_platform(p))
+        sync_btn.clicked.connect(lambda checked=False, p=platform: self._sync_platform(p))
         row.addWidget(sync_btn)
 
         logout_btn = QPushButton("Log Out")
         logout_btn.clicked.connect(
-            lambda p=platform, sl=status_lbl, sd=dot: self._logout_platform(p, sl, sd)
+            lambda checked=False, p=platform, sl=status_lbl, sd=dot:
+            self._logout_platform(p, sl, sd)
         )
         row.addWidget(logout_btn)
 
