@@ -221,14 +221,25 @@ class SettingsView(QWidget):
         import_btn = QPushButton("Import Session")
         import_btn.setObjectName("primaryButton")
         import_btn.setToolTip(
-            "Reads your existing login cookies from Chrome/Edge/Firefox. "
-            "You must be logged in to this platform in your browser."
+            "Reads your existing login cookies from Chrome/Edge/Firefox automatically. "
+            "If this fails with a permissions error, use 'Import from File' instead."
         )
         import_btn.clicked.connect(
             lambda checked=False, p=platform, sl=status_lbl, sd=dot, ib=import_btn:
             self._import_session(p, sl, sd, ib)
         )
         row.addWidget(import_btn)
+
+        file_btn = QPushButton("Import from File…")
+        file_btn.setToolTip(
+            "Import cookies from a file exported by the 'Get cookies.txt LOCALLY' "
+            "or 'Cookie-Editor' browser extension. No admin rights needed."
+        )
+        file_btn.clicked.connect(
+            lambda checked=False, p=platform, sl=status_lbl, sd=dot:
+            self._import_from_file(p, sl, sd)
+        )
+        row.addWidget(file_btn)
 
         test_btn = QPushButton("Test")
         test_btn.clicked.connect(
@@ -344,6 +355,31 @@ class SettingsView(QWidget):
                 self, f"{PLATFORM_DISPLAY[platform]} — Import Failed",
                 msg
             )
+
+    def _import_from_file(self, platform: str, status_lbl: QLabel, dot: QLabel):
+        """Open a file picker and import cookies from a .txt or .json export file."""
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            f"Import {PLATFORM_DISPLAY[platform]} Cookies",
+            "",
+            "Cookie Files (*.txt *.json);;All Files (*)"
+        )
+        if not path:
+            return
+
+        svc = self._get_service(platform)
+        ok, msg = svc.import_from_file(path)
+        if ok:
+            self._set_dot(dot, "ok")
+            status_lbl.setText("Connected — session imported from file")
+            QMessageBox.information(
+                self, f"{PLATFORM_DISPLAY[platform]} — Imported",
+                f"✓ {msg}\n\nYou can now click Sync to fetch your listings."
+            )
+        else:
+            self._set_dot(dot, "error")
+            status_lbl.setText("Import failed")
+            QMessageBox.warning(self, f"{PLATFORM_DISPLAY[platform]} — Import Failed", msg)
 
     def _logout_platform(self, platform: str, status_lbl: QLabel, dot: QLabel):
         svc = self._get_service(platform)

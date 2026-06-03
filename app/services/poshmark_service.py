@@ -75,6 +75,10 @@ class PoshmarkService:
         from app.utils.browser import import_cookies_from_browser
         import_cookies_from_browser(DOMAIN, SESSION, done_cb=done_cb)
 
+    def import_from_file(self, file_path: str) -> tuple[bool, str]:
+        from app.utils.browser import import_cookies_from_file
+        return import_cookies_from_file(file_path, SESSION)
+
     # ── Connection test ───────────────────────────────────────────────────
 
     def test_connection(self) -> tuple[bool, str]:
