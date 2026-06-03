@@ -49,6 +49,12 @@ def import_cookies_from_browser(
         ok, msg = False, ""
         try:
             ok, msg = _do_import(platform_domain, state_file)
+
+            # If cookies couldn't be read due to permissions, try UAC elevation.
+            # The elevated instance runs silently — the user just sees one UAC prompt.
+            if not ok and msg.startswith("_NEEDS_ELEVATION_:"):
+                ok, msg = import_cookies_elevated(platform_domain, state_file)
+
         except Exception as e:
             msg = str(e)
         finally:
@@ -57,6 +63,78 @@ def import_cookies_from_browser(
                 post_to_main(lambda: done_cb(ok, msg))
 
     threading.Thread(target=_worker, daemon=True).start()
+
+
+_ADMIN_KEYWORDS = ("admin", "access is denied", "access denied",
+                   "permission", "privilege", "key for cookie", "decrypt")
+
+
+def _needs_elevation(error_text: str) -> bool:
+    low = error_text.lower()
+    return any(kw in low for kw in _ADMIN_KEYWORDS)
+
+
+def import_cookies_elevated(domain: str, state_file: str) -> tuple[bool, str]:
+    """
+    Re-run this exe as admin (UAC prompt) to extract cookies that require
+    elevated permissions. Runs silently — no window appears.
+    Returns (ok, message) once the elevated process finishes.
+    """
+    import ctypes
+    import tempfile
+    import time
+
+    result_path = tempfile.mktemp(prefix="baum_cookies_", suffix=".json")
+
+    # Build the command: run the same executable with --cookie-extract args
+    exe = sys.executable   # works for both PyInstaller bundle and plain Python
+
+    if getattr(sys, "frozen", False):
+        # PyInstaller bundle: sys.executable IS BaumReseller.exe
+        args = f'--cookie-extract "{domain}" "{state_file}" "{result_path}"'
+    else:
+        # Running as a Python script
+        script = os.path.abspath(sys.argv[0])
+        args = f'"{script}" --cookie-extract "{domain}" "{state_file}" "{result_path}"'
+
+    # ShellExecuteW with "runas" triggers the UAC prompt
+    ret = ctypes.windll.shell32.ShellExecuteW(
+        None,     # hwnd  (no parent window)
+        "runas",  # verb  — requests elevation / UAC
+        exe,      # program
+        args,     # parameters
+        None,     # working directory
+        0,        # SW_HIDE  (no window)
+    )
+
+    if ret <= 32:
+        return False, (
+            "UAC elevation was cancelled or failed (code {ret}).\n"
+            "Use 'Import from File' as an alternative."
+        )
+
+    # Poll for the result file written by the elevated process (up to 30 s)
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        time.sleep(0.4)
+        if os.path.exists(result_path):
+            try:
+                with open(result_path, "r", encoding="utf-8") as f:
+                    result = json.load(f)
+                return result["ok"], result["msg"]
+            except Exception as e:
+                return False, f"Could not read extraction result: {e}"
+            finally:
+                try:
+                    os.unlink(result_path)
+                except Exception:
+                    pass
+
+    try:
+        os.unlink(result_path)
+    except Exception:
+        pass
+    return False, "Elevated process timed out. Try 'Import from File' instead."
 
 
 def _do_import(domain: str, state_file: str) -> tuple[bool, str]:
@@ -91,17 +169,16 @@ def _do_import(domain: str, state_file: str) -> tuple[bool, str]:
 
     if not cookies:
         detail = "; ".join(errors) if errors else "no cookies found"
+        # Return a special marker so the caller can try UAC elevation
+        if _needs_elevation(detail):
+            return False, f"_NEEDS_ELEVATION_:{detail}"
         return False, (
-            f"Could not read cookies automatically.\n\n"
-            f"This usually means the app needs elevated permissions to decrypt "
-            f"Chrome/Edge's cookie database.\n\n"
-            f"Use 'Import from File' instead:\n"
-            f"  1. Install the 'Get cookies.txt LOCALLY' Chrome extension\n"
-            f"     (search Chrome Web Store, it's free)\n"
-            f"  2. Go to {domain} while logged in\n"
-            f"  3. Click the extension → Export cookies → Save the .txt file\n"
-            f"  4. Click 'Import from File' and select that file\n\n"
-            f"Technical detail: {detail}"
+            f"No session cookies found for {domain}.\n\n"
+            f"Make sure you are logged into {domain} in Chrome, Edge, or Firefox, "
+            f"then click Import Session again.\n\n"
+            f"If that keeps failing, use 'Import from File' with the "
+            f"'Get cookies.txt LOCALLY' Chrome extension.\n\n"
+            f"Detail: {detail}"
         )
 
     state = {"cookies": cookies, "origins": []}
