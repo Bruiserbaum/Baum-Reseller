@@ -1,6 +1,6 @@
 """
 Poshmark integration.
-Login: real Chrome/Edge subprocess — no automation flags, supports Google SSO + 2FA.
+Login: opens poshmark.com in the user's own browser; imports existing cookies.
 Sync:  headless Playwright using saved session cookies.
 """
 import os
@@ -9,6 +9,7 @@ import json
 import keyring
 
 SERVICE    = "baum-reseller-poshmark"
+DOMAIN     = "poshmark.com"
 SESSION    = os.path.join(os.path.expanduser("~"), ".baum-reseller", "poshmark_session.json")
 PROFILE    = os.path.join(os.path.expanduser("~"), ".baum-reseller", "poshmark_profile")
 LOGIN_URL  = "https://poshmark.com/login"
@@ -64,15 +65,15 @@ class PoshmarkService:
 
     # ── Browser login (real browser, no automation flags) ─────────────────
 
-    def login_browser(self, done_cb=None):
-        from app.utils.browser import launch_login_window
-        launch_login_window(
-            login_url=LOGIN_URL,
-            profile_dir=PROFILE,
-            is_logged_in=_is_logged_in,
-            state_file=SESSION,
-            done_cb=done_cb,
-        )
+    def open_in_browser(self):
+        """Open the Poshmark login page in the user's default browser."""
+        from app.utils.browser import open_in_system_browser
+        open_in_system_browser(LOGIN_URL)
+
+    def import_session(self, done_cb=None):
+        """Read Poshmark cookies from the system browser and save the session."""
+        from app.utils.browser import import_cookies_from_browser
+        import_cookies_from_browser(DOMAIN, SESSION, done_cb=done_cb)
 
     # ── Connection test ───────────────────────────────────────────────────
 

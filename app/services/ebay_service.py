@@ -9,6 +9,7 @@ import json
 import keyring
 
 SERVICE    = "baum-reseller-ebay"
+DOMAIN     = "ebay.com"
 SESSION    = os.path.join(os.path.expanduser("~"), ".baum-reseller", "ebay_session.json")
 PROFILE    = os.path.join(os.path.expanduser("~"), ".baum-reseller", "ebay_profile")
 LOGIN_URL  = "https://www.ebay.com/signin/"
@@ -55,15 +56,13 @@ class EbayService:
 
     # ── Browser login ─────────────────────────────────────────────────────
 
-    def login_browser(self, done_cb=None):
-        from app.utils.browser import launch_login_window
-        launch_login_window(
-            login_url=LOGIN_URL,
-            profile_dir=PROFILE,
-            is_logged_in=_is_logged_in,
-            state_file=SESSION,
-            done_cb=done_cb,
-        )
+    def open_in_browser(self):
+        from app.utils.browser import open_in_system_browser
+        open_in_system_browser(LOGIN_URL)
+
+    def import_session(self, done_cb=None):
+        from app.utils.browser import import_cookies_from_browser
+        import_cookies_from_browser(DOMAIN, SESSION, done_cb=done_cb)
 
     # ── Connection test ───────────────────────────────────────────────────
 

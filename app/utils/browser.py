@@ -1,33 +1,24 @@
 """
 Platform browser utilities.
 
-Login  — uses Playwright's own launch() with the actual Chrome or Edge binary
-(channel="chrome" / "msedge"). Playwright creates an isolated process so there
-are no Chrome singleton issues and no "Restore pages" dialogs from previous
-sessions. Automation detection flags are stripped so Google SSO and 2FA work.
+Login flow (new):
+  1. open_in_system_browser(url) — opens the platform in the user's everyday
+     browser using webbrowser.open(). No automation, no fingerprinting.
+     Google SSO, 2FA, and all auth methods work exactly as normal.
 
-Sync   — headless Playwright context loaded from a saved storage_state JSON.
+  2. import_cookies_from_browser(domain, state_file) — reads the user's
+     existing cookies for that domain from Chrome, Edge, or Firefox and
+     saves them as a Playwright storage_state JSON. The user just needs to
+     be already logged in.
+
+Sync (headless):
+  headless_context(playwright, state_file) — loads the saved cookies into
+  a Playwright context for scraping without re-authenticating.
 """
+import json
 import os
 import threading
-
-# Script injected into every login page to hide automation fingerprints
-_ANTI_DETECT = """
-    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-    Object.defineProperty(navigator, 'plugins',   { get: () => [1, 2, 3, 4, 5] });
-    window.chrome = { runtime: {} };
-"""
-
-_LAUNCH_ARGS = [
-    "--disable-blink-features=AutomationControlled",
-    "--no-sandbox",
-    "--no-first-run",
-    "--no-default-browser-check",
-    "--disable-infobars",
-    "--start-maximized",
-    "--disable-features=ChromeWhatsNewUI,TranslateUI",
-    "--disable-session-crashed-bubble",
-]
+import webbrowser
 
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -36,90 +27,105 @@ _USER_AGENT = (
 )
 
 
-# ── Headed browser for login ──────────────────────────────────────────────
+# ── System-browser helpers ────────────────────────────────────────────────
 
-def _launch_headed(playwright):
-    """
-    Launch a headed browser for interactive login.
-    Tries Chrome → Edge → Playwright's Chromium.
-    All automation-related flags are stripped.
-    """
-    for channel in ("chrome", "msedge", None):
-        try:
-            kwargs = dict(
-                headless=False,
-                args=_LAUNCH_ARGS,
-                ignore_default_args=["--enable-automation"],
-            )
-            if channel:
-                kwargs["channel"] = channel
-            return playwright.chromium.launch(**kwargs)
-        except Exception:
-            continue
-    raise RuntimeError(
-        "No browser found (Chrome, Edge, or Playwright Chromium).\n"
-        "Install Chrome or run:  py -m playwright install chromium"
-    )
+def open_in_system_browser(url: str):
+    """Open url in the user's default browser (Chrome/Edge/Firefox/etc.)."""
+    webbrowser.open(url)
 
 
-def launch_login_window(
-    login_url: str,
-    profile_dir: str,   # kept for API compatibility; not used in this approach
-    is_logged_in,       # callable(url: str) -> bool
+def import_cookies_from_browser(
+    platform_domain: str,
     state_file: str,
     done_cb=None,
 ):
     """
-    Open a headed browser, navigate to login_url, and wait for the user to
-    complete authentication (including 2FA). Saves cookies to state_file
-    and closes the browser.
+    Read cookies for platform_domain from Chrome, Edge, or Firefox and save
+    them as a Playwright storage_state JSON at state_file.
 
-    Uses Playwright's own process management — no Chrome singleton issues.
+    Runs in a background thread. Calls done_cb(ok: bool, message: str).
     """
     def _worker():
-        ok, err = False, None
+        ok, msg = False, ""
         try:
-            from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
-
-            with sync_playwright() as p:
-                browser = _launch_headed(p)
-
-                ctx = browser.new_context(user_agent=_USER_AGENT)
-                page = ctx.new_page()
-                page.add_init_script(_ANTI_DETECT)
-
-                page.goto(login_url, wait_until="domcontentloaded", timeout=30_000)
-                page.bring_to_front()
-
-                try:
-                    page.wait_for_url(is_logged_in, timeout=300_000)
-                except PWTimeout:
-                    raise RuntimeError(
-                        "Login timed out (5 minutes). If two-factor authentication "
-                        "was required, complete it in the browser window and wait "
-                        "for the home page to finish loading."
-                    )
-
-                os.makedirs(os.path.dirname(state_file), exist_ok=True)
-                ctx.storage_state(path=state_file)
-                browser.close()
-                ok = True
-
+            ok, msg = _do_import(platform_domain, state_file)
         except Exception as e:
-            raw = str(e)
-            if any(w in raw.lower() for w in ("closed", "target", "detached")):
-                err = "Login cancelled — the browser window was closed."
-            else:
-                err = raw
+            msg = str(e)
         finally:
             if done_cb:
                 from app.utils.qt_thread import post_to_main
-                post_to_main(lambda: done_cb(ok, err))
+                post_to_main(lambda: done_cb(ok, msg))
 
     threading.Thread(target=_worker, daemon=True).start()
 
 
-# ── Headless context for sync ─────────────────────────────────────────────
+def _do_import(domain: str, state_file: str) -> tuple[bool, str]:
+    try:
+        import browser_cookie3
+    except ImportError:
+        return False, (
+            "browser-cookie3 is not installed.\n"
+            "Run:  py -m pip install browser-cookie3"
+        )
+
+    extractors = [
+        ("Chrome",  browser_cookie3.chrome),
+        ("Edge",    browser_cookie3.edge),
+        ("Firefox", browser_cookie3.firefox),
+    ]
+
+    cookies = []
+    source = None
+    errors = []
+
+    for name, extract in extractors:
+        try:
+            jar = extract(domain_name=domain)
+            found = [_convert_cookie(c) for c in jar]
+            if found:
+                cookies = found
+                source = name
+                break
+        except Exception as e:
+            errors.append(f"{name}: {e}")
+
+    if not cookies:
+        detail = "; ".join(errors) if errors else "no cookies found"
+        return False, (
+            f"No session cookies found for {domain}.\n\n"
+            f"Make sure you are logged into {domain} in Chrome, Edge, or Firefox, "
+            f"then click Import Session again.\n\n"
+            f"Detail: {detail}"
+        )
+
+    state = {"cookies": cookies, "origins": []}
+    os.makedirs(os.path.dirname(state_file), exist_ok=True)
+    with open(state_file, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2)
+
+    return True, f"Imported {len(cookies)} cookies from {source}."
+
+
+def _convert_cookie(c) -> dict:
+    """Convert a browser_cookie3 cookie to Playwright storage_state format."""
+    domain = c.domain or ""
+    if domain and not domain.startswith("."):
+        domain = "." + domain
+    cookie = {
+        "name":     c.name,
+        "value":    c.value,
+        "domain":   domain,
+        "path":     c.path or "/",
+        "secure":   bool(c.secure),
+        "httpOnly": False,
+        "sameSite": "Lax",
+    }
+    if c.expires:
+        cookie["expires"] = float(c.expires)
+    return cookie
+
+
+# ── Headless sync context ─────────────────────────────────────────────────
 
 def headless_context(playwright, state_file: str):
     """

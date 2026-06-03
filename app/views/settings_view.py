@@ -46,8 +46,9 @@ class SettingsView(QWidget):
         conn_layout = QVBoxLayout(conn_group)
 
         note = QLabel(
-            "All platforms use browser-based login — sign in with email/password or Google. "
-            "Two-factor authentication is supported. The browser stays open until you reach the home page."
+            "Click Open in Browser to open the platform in your normal browser (Chrome, Edge, etc.), "
+            "then log in as usual — Google Sign-In, 2FA, and any other method all work. "
+            "Once you're logged in, click Import Session and the app will read your cookies automatically."
         )
         note.setWordWrap(True)
         note.setStyleSheet("color: #a6adc8; font-size: 11px;")
@@ -176,16 +177,19 @@ class SettingsView(QWidget):
         layout.addStretch()
         scroll.setWidget(content)
 
-    # ── Platform row builders ─────────────────────────────────────────────
+    # ── Platform row builder ──────────────────────────────────────────────
 
-    def _build_ebay_row(self) -> dict:
-        """eBay uses API key credentials, tested via OAuth token request."""
+    def _build_browser_row(self, platform: str) -> dict:
+        """All platforms: Open in Browser → Import Session → Test → Sync."""
+        label = PLATFORM_DISPLAY[platform]
+
         container = QFrame()
         container.setObjectName("platformRow")
         row = QHBoxLayout(container)
         row.setContentsMargins(10, 10, 10, 10)
+        row.setSpacing(6)
 
-        name_lbl = QLabel("eBay")
+        name_lbl = QLabel(label)
         name_lbl.setFixedWidth(90)
         row.addWidget(name_lbl)
 
@@ -194,8 +198,8 @@ class SettingsView(QWidget):
         dot.setFixedWidth(20)
         row.addWidget(dot)
 
-        status_lbl = QLabel("Not configured")
-        status_lbl.setMinimumWidth(180)
+        status_lbl = QLabel("Not connected")
+        status_lbl.setMinimumWidth(220)
         row.addWidget(status_lbl)
 
         last_lbl = QLabel("")
@@ -203,118 +207,48 @@ class SettingsView(QWidget):
         row.addWidget(last_lbl)
         row.addStretch()
 
-        id_edit = QLineEdit()
-        id_edit.setPlaceholderText("Client ID")
-        id_edit.setEchoMode(QLineEdit.Password)
-        id_edit.setFixedWidth(150)
-        row.addWidget(id_edit)
+        open_btn = QPushButton("Open in Browser")
+        open_btn.setToolTip(
+            f"Opens {label} in your normal browser. Log in however you like, "
+            "then click Import Session."
+        )
+        open_btn.clicked.connect(
+            lambda p=platform, sl=status_lbl:
+            self._open_in_browser(p, sl)
+        )
+        row.addWidget(open_btn)
 
-        secret_edit = QLineEdit()
-        secret_edit.setPlaceholderText("Client Secret")
-        secret_edit.setEchoMode(QLineEdit.Password)
-        secret_edit.setFixedWidth(150)
-        row.addWidget(secret_edit)
-
-        save_btn = QPushButton("Save")
-        save_btn.clicked.connect(lambda: self._save_ebay_creds(id_edit.text(), secret_edit.text()))
-        row.addWidget(save_btn)
+        import_btn = QPushButton("Import Session")
+        import_btn.setObjectName("primaryButton")
+        import_btn.setToolTip(
+            "Reads your existing login cookies from Chrome/Edge/Firefox. "
+            "You must be logged in to this platform in your browser."
+        )
+        import_btn.clicked.connect(
+            lambda p=platform, sl=status_lbl, sd=dot, ib=import_btn:
+            self._import_session(p, sl, sd, ib)
+        )
+        row.addWidget(import_btn)
 
         test_btn = QPushButton("Test")
-        test_btn.clicked.connect(lambda: self._test_platform_async("ebay", status_lbl, dot))
+        test_btn.clicked.connect(
+            lambda p=platform, sl=status_lbl, sd=dot:
+            self._test_platform_async(p, sl, sd)
+        )
         row.addWidget(test_btn)
 
         sync_btn = QPushButton("Sync")
-        sync_btn.clicked.connect(lambda: self._sync_platform("ebay"))
-        row.addWidget(sync_btn)
-
-        return {"widget": container, "status_label": status_lbl,
-                "status_dot": dot, "last_sync": last_lbl}
-
-    def _build_browser_row(self, platform: str) -> dict:
-        """Mercari / Poshmark — browser-based auth (email/pass or Google SSO)."""
-        label = PLATFORM_DISPLAY[platform]
-
-        container = QFrame()
-        container.setObjectName("platformRow")
-        col = QVBoxLayout(container)
-        col.setContentsMargins(10, 10, 10, 10)
-        col.setSpacing(6)
-
-        # Top row: status
-        top = QHBoxLayout()
-        name_lbl = QLabel(label)
-        name_lbl.setFixedWidth(90)
-        top.addWidget(name_lbl)
-
-        dot = QLabel("●")
-        dot.setObjectName("statusDotUnknown")
-        dot.setFixedWidth(20)
-        top.addWidget(dot)
-
-        status_lbl = QLabel("Not logged in")
-        status_lbl.setMinimumWidth(200)
-        top.addWidget(status_lbl)
-
-        last_lbl = QLabel("")
-        last_lbl.setStyleSheet("color:#585b70; font-size:11px;")
-        top.addWidget(last_lbl)
-        top.addStretch()
-        col.addLayout(top)
-
-        # Bottom row: optional credential pre-fill + action buttons
-        bot = QHBoxLayout()
-        bot.addSpacing(110)  # indent to align under status
-
-        email_edit = QLineEdit()
-        email_edit.setPlaceholderText("Email (optional pre-fill)")
-        email_edit.setFixedWidth(180)
-        bot.addWidget(email_edit)
-
-        pw_edit = QLineEdit()
-        pw_edit.setPlaceholderText("Password (optional)")
-        pw_edit.setEchoMode(QLineEdit.Password)
-        pw_edit.setFixedWidth(140)
-        bot.addWidget(pw_edit)
-
-        save_btn = QPushButton("Save")
-        save_btn.setToolTip("Save email/password for browser auto-fill")
-        save_btn.clicked.connect(
-            lambda p=platform, e=email_edit, pw=pw_edit:
-            self._save_platform_creds(p, e.text(), pw.text())
-        )
-        bot.addWidget(save_btn)
-
-        login_btn = QPushButton("Login with Browser")
-        login_btn.setObjectName("primaryButton")
-        login_btn.setToolTip(
-            "Opens a browser window — log in with email/password or 'Continue with Google'"
-        )
-        login_btn.clicked.connect(
-            lambda p=platform, sl=status_lbl, sd=dot, lb=login_btn:
-            self._browser_login(p, sl, sd, lb)
-        )
-        bot.addWidget(login_btn)
-
-        test_btn = QPushButton("Test")
-        test_btn.clicked.connect(lambda p=platform, sl=status_lbl, sd=dot:
-                                 self._test_platform_async(p, sl, sd))
-        bot.addWidget(test_btn)
-
-        sync_btn = QPushButton("Sync")
         sync_btn.clicked.connect(lambda p=platform: self._sync_platform(p))
-        bot.addWidget(sync_btn)
+        row.addWidget(sync_btn)
 
         logout_btn = QPushButton("Log Out")
         logout_btn.clicked.connect(
             lambda p=platform, sl=status_lbl, sd=dot: self._logout_platform(p, sl, sd)
         )
-        bot.addWidget(logout_btn)
-
-        col.addLayout(bot)
+        row.addWidget(logout_btn)
 
         return {"widget": container, "status_label": status_lbl,
-                "status_dot": dot, "last_sync": last_lbl,
-                "email_edit": email_edit, "pw_edit": pw_edit}
+                "status_dot": dot, "last_sync": last_lbl}
 
     # ── Settings loading ──────────────────────────────────────────────────
 
@@ -330,23 +264,9 @@ class SettingsView(QWidget):
 
             if p in ("ebay", "mercari", "poshmark"):
                 svc = self._get_service(p)
-
-                # Pre-populate email field from config.json (survives reinstalls)
-                saved_email = cfg_get(f"{p}_email", "")
-                if saved_email and "email_edit" in row:
-                    row["email_edit"].setPlaceholderText(saved_email)
-
-                # Also try keyring for full credential pre-fill
-                try:
-                    creds = svc.get_credentials()
-                    if creds.get("email") and "email_edit" in row:
-                        row["email_edit"].setText(creds["email"])
-                except Exception:
-                    pass
-
                 if svc.has_session():
                     self._set_dot(row["status_dot"], "ok")
-                    row["status_label"].setText("Session saved — ready to sync")
+                    row["status_label"].setText("Connected — ready to sync")
 
         sched = get_setting("backup_schedule", "Disabled")
         idx = self.backup_schedule.findText(sched)
@@ -380,63 +300,48 @@ class SettingsView(QWidget):
         dot.style().polish(dot)
         dot.update()
 
-    # ── Credential save ───────────────────────────────────────────────────
+    # ── Open in browser ───────────────────────────────────────────────────
 
-    def _save_ebay_creds(self, client_id: str, secret: str):
-        if not client_id or not secret:
-            QMessageBox.warning(self, "eBay", "Enter both Client ID and Client Secret.")
-            return
-        from app.services.ebay_service import EbayService
-        EbayService().save_credentials(client_id, secret)
-        QMessageBox.information(self, "eBay", "Credentials saved.")
-
-    def _save_platform_creds(self, platform: str, email: str, password: str):
+    def _open_in_browser(self, platform: str, status_lbl: QLabel):
+        """Open the platform in the user's default browser."""
         svc = self._get_service(platform)
-        err = svc.save_credentials(email, password)
-        if err:
-            QMessageBox.warning(
-                self, PLATFORM_DISPLAY[platform],
-                f"Failed to save credentials:\n{err}"
-            )
-        else:
-            QMessageBox.information(
-                self, PLATFORM_DISPLAY[platform],
-                "Credentials saved.\n\nClick 'Login with Browser' to authenticate.\n"
-                "(You can also sign in with Google in the browser window.)"
-            )
+        svc.open_in_browser()
+        status_lbl.setText(
+            f"Opened in your browser — log in if needed, then click Import Session"
+        )
 
-    # ── Browser login ─────────────────────────────────────────────────────
+    # ── Import session ────────────────────────────────────────────────────
 
-    def _browser_login(self, platform: str, status_lbl: QLabel,
-                       dot: QLabel, login_btn: QPushButton):
-        login_btn.setEnabled(False)
-        login_btn.setText("Browser open…")
-        status_lbl.setText("Sign in — complete 2FA if prompted, then wait for the home page…")
+    def _import_session(self, platform: str, status_lbl: QLabel,
+                        dot: QLabel, import_btn: QPushButton):
+        """Read cookies from the system browser and save the session."""
+        import_btn.setEnabled(False)
+        status_lbl.setText("Reading cookies from your browser…")
         self._set_dot(dot, "unknown")
 
         svc = self._get_service(platform)
 
-        def _done(ok: bool, err: str | None):
-            post_to_main(lambda:self._on_browser_login_done(
-                ok, err, platform, status_lbl, dot, login_btn
-            ))
+        def _done(ok: bool, msg: str):
+            post_to_main(lambda: self._on_import_done(ok, msg, platform, status_lbl, dot, import_btn))
 
-        svc.login_browser(done_cb=_done)
+        svc.import_session(done_cb=_done)
 
-    def _on_browser_login_done(self, ok: bool, err: str | None, platform: str,
-                               status_lbl: QLabel, dot: QLabel, login_btn: QPushButton):
-        login_btn.setEnabled(True)
-        login_btn.setText("Login with Browser")
+    def _on_import_done(self, ok: bool, msg: str, platform: str,
+                        status_lbl: QLabel, dot: QLabel, import_btn: QPushButton):
+        import_btn.setEnabled(True)
         if ok:
             self._set_dot(dot, "ok")
-            status_lbl.setText("Logged in — session saved")
-            self._platform_rows[platform]["last_sync"].setText("")
+            status_lbl.setText("Connected — session imported")
+            QMessageBox.information(
+                self, f"{PLATFORM_DISPLAY[platform]} — Session Imported",
+                f"✓ {msg}\n\nYou can now click Sync to fetch your listings."
+            )
         else:
             self._set_dot(dot, "error")
-            status_lbl.setText("Login failed")
-            QMessageBox.critical(
-                self, f"{PLATFORM_DISPLAY[platform]} Login Failed",
-                f"Could not complete login:\n\n{err}"
+            status_lbl.setText("Import failed — see error for details")
+            QMessageBox.warning(
+                self, f"{PLATFORM_DISPLAY[platform]} — Import Failed",
+                msg
             )
 
     def _logout_platform(self, platform: str, status_lbl: QLabel, dot: QLabel):
@@ -444,7 +349,7 @@ class SettingsView(QWidget):
         if hasattr(svc, "clear_session"):
             svc.clear_session()
         self._set_dot(dot, "unknown")
-        status_lbl.setText("Logged out")
+        status_lbl.setText("Logged out — click Import Session to reconnect")
 
     # ── Test (runs in background thread, shows popup with result) ─────────
 
