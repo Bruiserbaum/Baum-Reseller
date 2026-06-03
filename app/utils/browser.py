@@ -17,6 +17,7 @@ Sync (headless):
 """
 import json
 import os
+import sys
 import threading
 import webbrowser
 
