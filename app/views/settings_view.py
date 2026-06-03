@@ -46,9 +46,10 @@ class SettingsView(QWidget):
         conn_layout = QVBoxLayout(conn_group)
 
         note = QLabel(
-            "Click Open in Browser to open the platform in your normal browser (Chrome, Edge, etc.), "
-            "then log in as usual — Google Sign-In, 2FA, and any other method all work. "
-            "Once you're logged in, click Import Session and the app will read your cookies automatically."
+            "Log in to each platform in your normal browser, then click Import Session.\n"
+            "If Import Session fails (Chrome 127+ blocks direct cookie access), use Import from File…:\n"
+            "  Install 'Get cookies.txt LOCALLY' from Chrome Web Store → visit the site → "
+            "export cookies → click Import from File…"
         )
         note.setWordWrap(True)
         note.setStyleSheet("color: #a6adc8; font-size: 11px;")

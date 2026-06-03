@@ -51,10 +51,28 @@ def import_cookies_from_browser(
         try:
             ok, msg = _do_import(platform_domain, state_file)
 
-            # If cookies couldn't be read due to permissions, try UAC elevation.
-            # The elevated instance runs silently — the user just sees one UAC prompt.
             if not ok and msg.startswith("_NEEDS_ELEVATION_:"):
-                ok, msg = import_cookies_elevated(platform_domain, state_file)
+                # First attempt failed with a permissions error — try UAC elevation
+                elev_ok, elev_msg = import_cookies_elevated(platform_domain, state_file)
+                if elev_ok:
+                    ok, msg = True, elev_msg
+                else:
+                    # Elevated also failed — Chrome 127+ App-Bound Encryption
+                    # prevents direct cookie access even as admin.
+                    # Strip the sentinel and give clear instructions.
+                    raw = elev_msg.removeprefix("_NEEDS_ELEVATION_:")
+                    ok  = False
+                    msg = (
+                        "Chrome's App-Bound Encryption (Chrome 127+) prevents direct "
+                        "cookie access even with admin rights.\n\n"
+                        "Use 'Import from File' instead — it takes about 30 seconds:\n\n"
+                        "  1. In Chrome, open the Web Store and install\n"
+                        "     'Get cookies.txt LOCALLY' (free, search that name)\n"
+                        "  2. Go to the platform website while logged in\n"
+                        "  3. Click the extension icon → Export cookies → save the file\n"
+                        "  4. Click 'Import from File...' in this app and select it\n\n"
+                        f"Technical detail: {raw}"
+                    )
 
         except Exception as e:
             msg = str(e)

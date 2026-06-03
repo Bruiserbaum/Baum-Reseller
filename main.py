@@ -58,6 +58,10 @@ def _run_cookie_extract():
     try:
         from app.utils.browser import _do_import
         ok, msg = _do_import(domain, state_file)
+        # Strip sentinel so the main process can distinguish "also failed elevated"
+        # from a plain error without trying to elevate again infinitely.
+        if not ok and msg.startswith("_NEEDS_ELEVATION_:"):
+            msg = "_NEEDS_ELEVATION_:" + msg[len("_NEEDS_ELEVATION_:"):]
     except Exception as e:
         ok, msg = False, str(e)
 
