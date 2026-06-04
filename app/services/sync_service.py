@@ -30,6 +30,13 @@ def sync_platform(platform: str, progress_cb=None, done_cb=None):
         try:
             svc = _get_service(platform)
             listings = svc.fetch_listings(progress_cb=progress_cb)
+            # eBay also exposes sold orders via a dedicated method
+            if platform == "ebay" and hasattr(svc, "fetch_sold_orders"):
+                try:
+                    sold = svc.fetch_sold_orders()
+                    listings.extend(sold)
+                except Exception:
+                    pass  # don't abort active-listing sync if orders fail
             _persist_listings(platform, listings)
             ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
             set_setting(f"last_sync_{platform}", ts)
@@ -52,6 +59,11 @@ def sync_all(progress_cb=None, done_cb=None):
             try:
                 svc = _get_service(p)
                 listings = svc.fetch_listings(progress_cb=progress_cb)
+                if p == "ebay" and hasattr(svc, "fetch_sold_orders"):
+                    try:
+                        listings.extend(svc.fetch_sold_orders())
+                    except Exception:
+                        pass
                 _persist_listings(p, listings)
                 total += len(listings)
                 ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -80,4 +92,6 @@ def _persist_listings(platform: str, listings: list[dict]):
             "listing_price": l.get("price", 0),
             "status": l.get("status", "active"),
             "listed_date": l.get("listed_date", ""),
+            "sold_date": l.get("sold_date", ""),
+            "sold_price": l.get("sold_price", l.get("price", 0) if l.get("status") == "sold" else 0),
         })
