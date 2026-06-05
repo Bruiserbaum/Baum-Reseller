@@ -11,6 +11,9 @@ datas = [
 datas += collect_data_files('PySide6', includes=['*.dll', 'plugins/**/*'])
 datas += collect_data_files('matplotlib')
 datas += collect_data_files('reportlab')
+# Bundle the Playwright driver (playwright.exe + Node packages) so sync works
+# in the frozen app without requiring a separate `playwright install` step.
+datas += collect_data_files('playwright')
 
 # Hidden imports required for runtime
 hiddenimports = [

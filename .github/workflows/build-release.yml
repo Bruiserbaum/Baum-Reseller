@@ -31,6 +31,14 @@ jobs:
       - name: Build with PyInstaller
         run: py -m PyInstaller baum_reseller.spec --noconfirm
 
+      - name: Pre-install Playwright Chromium into dist
+        shell: pwsh
+        run: |
+          # Install Chromium directly into the dist bundle so the app works
+          # out of the box without a download on first run.
+          $env:PLAYWRIGHT_BROWSERS_PATH = Join-Path (Get-Location) "dist\BaumReseller\_internal\playwright-browsers"
+          py -m playwright install chromium
+
       - name: Create LICENSE if missing
         shell: pwsh
         run: |

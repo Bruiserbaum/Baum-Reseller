@@ -2,12 +2,23 @@ import sys
 import os
 
 # ── Playwright browser path (MUST be set before any Playwright import) ────────
-# When frozen by PyInstaller the default path is inside the read-only
-# _internal dir (C:\Program Files\…\BaumReseller\_internal\…).
-# Redirect to a user-writable location so `playwright install` can write there.
-_PLAYWRIGHT_BROWSERS = os.path.join(
-    os.path.expanduser("~"), ".baum-reseller", "playwright-browsers"
-)
+# Frozen (installed) builds: browsers are pre-bundled inside _internal by CI.
+# Development builds: browsers live in the user profile (downloaded on demand).
+if getattr(sys, "frozen", False):
+    # Browsers shipped alongside the exe inside _internal/playwright-browsers/
+    _PLAYWRIGHT_BROWSERS = os.path.join(
+        os.path.dirname(sys.executable), "_internal", "playwright-browsers"
+    )
+    # Fallback: if somehow browsers are missing from the bundle, use the user
+    # profile so the background install can still write somewhere writable.
+    if not os.path.isdir(_PLAYWRIGHT_BROWSERS):
+        _PLAYWRIGHT_BROWSERS = os.path.join(
+            os.path.expanduser("~"), ".baum-reseller", "playwright-browsers"
+        )
+else:
+    _PLAYWRIGHT_BROWSERS = os.path.join(
+        os.path.expanduser("~"), ".baum-reseller", "playwright-browsers"
+    )
 os.environ["PLAYWRIGHT_BROWSERS_PATH"] = _PLAYWRIGHT_BROWSERS
 
 
