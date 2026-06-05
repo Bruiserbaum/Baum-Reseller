@@ -4,6 +4,8 @@ A Windows desktop app for managing reselling inventory across **eBay**, **Mercar
 
 Track every item from purchase to sale — with cross-platform listing detection, bin tracking, automated alerts, profit reporting, and cloud backup.
 
+<img width="1338" height="846" alt="image" src="https://github.com/user-attachments/assets/54453a36-4568-41f8-97f5-c1afed3d5d19" />
+
 ---
 
 ## Features

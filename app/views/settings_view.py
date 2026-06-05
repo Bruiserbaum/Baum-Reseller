@@ -1,12 +1,14 @@
 import os
 import datetime
+import threading
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QLineEdit, QGroupBox, QFormLayout, QScrollArea, QMessageBox,
+    QLineEdit, QGroupBox, QScrollArea, QMessageBox,
     QComboBox, QProgressBar, QFileDialog, QFrame
 )
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt
+from app.utils.qt_thread import post_to_main
 
 from app.database.models import get_setting, set_setting
 from version import VERSION
@@ -43,11 +45,25 @@ class SettingsView(QWidget):
         conn_group = QGroupBox("Platform Connections")
         conn_layout = QVBoxLayout(conn_group)
 
+        note = QLabel(
+            "Recommended: click 'Login (Browser)' — a browser window opens, log in normally "
+            "(MFA, Google SSO, and captcha all work), session saves automatically.\n"
+            "Alternative: log in to each platform in your normal browser, then click "
+            "'Import Session'.\n"
+            "If Import Session fails (Chrome 127+ App-Bound Encryption), use "
+            "'Import from File' with the 'Get cookies.txt LOCALLY' Chrome extension."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #a6adc8; font-size: 11px;")
+        conn_layout.addWidget(note)
+
         self._platform_rows: dict[str, dict] = {}
-        for platform in ("ebay", "mercari", "poshmark"):
-            row = self._build_platform_row(platform)
+        self._platform_rows["ebay"]     = self._build_browser_row("ebay")
+        self._platform_rows["mercari"]  = self._build_browser_row("mercari")
+        self._platform_rows["poshmark"] = self._build_browser_row("poshmark")
+
+        for row in self._platform_rows.values():
             conn_layout.addWidget(row["widget"])
-            self._platform_rows[platform] = row
 
         layout.addWidget(conn_group)
 
@@ -100,7 +116,7 @@ class SettingsView(QWidget):
         layout.addWidget(update_group)
 
         # ── Backup ────────────────────────────────────────────────────────
-        backup_group = QGroupBox("Backup & Restore")
+        backup_group = QGroupBox("Backup && Restore")
         backup_layout = QVBoxLayout(backup_group)
 
         gdrive_row = QHBoxLayout()
@@ -147,133 +163,134 @@ class SettingsView(QWidget):
         backup_layout.addWidget(self.backup_status)
 
         layout.addWidget(backup_group)
-        layout.addStretch()
 
+        # ── Data Location Notice ──────────────────────────────────────────
+        data_dir = os.path.join(os.path.expanduser("~"), ".baum-reseller")
+        data_notice = QLabel(
+            f"\U0001F512  Your data (database, credentials, browser sessions) is stored at:\n"
+            f"    {data_dir}\n"
+            f"    This folder is NOT modified by app reinstalls or updates — "
+            "your settings are always preserved."
+        )
+        data_notice.setWordWrap(True)
+        data_notice.setStyleSheet(
+            "color: #a6adc8; font-size: 11px; "
+            "background: #252535; border-radius: 6px; padding: 10px;"
+        )
+        layout.addWidget(data_notice)
+        layout.addStretch()
         scroll.setWidget(content)
 
-    # ── Platform row builder ──────────────────────────────────────────────────
+    # ── Platform row builder ──────────────────────────────────────────────
 
-    def _build_platform_row(self, platform: str) -> dict:
+    def _build_browser_row(self, platform: str) -> dict:
         label = PLATFORM_DISPLAY[platform]
+
         container = QFrame()
         container.setObjectName("platformRow")
-        row_layout = QVBoxLayout(container)
-        row_layout.setContentsMargins(8, 8, 8, 8)
-        row_layout.setSpacing(6)
 
-        # Top sub-row: name, status dot, status text, session badge, last-sync
+        # Two sub-rows: status line + action buttons
+        col = QVBoxLayout(container)
+        col.setContentsMargins(10, 10, 10, 10)
+        col.setSpacing(4)
+
+        # ── Row 1: name · dot · status · last-sync ────────────────────────
         top = QHBoxLayout()
         name_lbl = QLabel(label)
         name_lbl.setFixedWidth(90)
         top.addWidget(name_lbl)
 
-        status_dot = QLabel("●")
-        status_dot.setFixedWidth(20)
-        status_dot.setObjectName("statusDotUnknown")
-        top.addWidget(status_dot)
+        dot = QLabel("●")
+        dot.setObjectName("statusDotUnknown")
+        dot.setFixedWidth(20)
+        top.addWidget(dot)
 
-        status_lbl = QLabel("Not configured")
-        status_lbl.setFixedWidth(220)
+        status_lbl = QLabel("Not connected")
+        status_lbl.setMinimumWidth(260)
         top.addWidget(status_lbl)
 
-        session_lbl = QLabel("")
-        session_lbl.setFixedWidth(140)
-        top.addWidget(session_lbl)
-
-        last_sync = QLabel("")
-        top.addWidget(last_sync)
+        last_lbl = QLabel("")
+        last_lbl.setStyleSheet("color:#585b70; font-size:11px;")
+        top.addWidget(last_lbl)
         top.addStretch()
-        row_layout.addLayout(top)
+        col.addLayout(top)
 
-        # Bottom sub-row: credential fields + action buttons
-        bottom = QHBoxLayout()
+        # ── Row 2: action buttons ─────────────────────────────────────────
+        btns = QHBoxLayout()
 
-        if platform == "ebay":
-            id_edit = QLineEdit()
-            id_edit.setPlaceholderText("Client ID")
-            id_edit.setFixedWidth(160)
-            id_edit.setEchoMode(QLineEdit.Password)
-            secret_edit = QLineEdit()
-            secret_edit.setPlaceholderText("Client Secret")
-            secret_edit.setFixedWidth(160)
-            secret_edit.setEchoMode(QLineEdit.Password)
-            bottom.addWidget(id_edit)
-            bottom.addWidget(secret_edit)
+        login_btn = QPushButton("Login (Browser)")
+        login_btn.setObjectName("primaryButton")
+        login_btn.setToolTip(
+            "Opens a Chromium browser window — log in however you like.\n"
+            "MFA, Google SSO, and captcha all work normally.\n"
+            "Session is saved automatically. No cookie decryption needed.\n\n"
+            "Use this if 'Import Session' fails due to Chrome encryption."
+        )
+        login_btn.clicked.connect(
+            lambda checked=False, p=platform, sl=status_lbl, sd=dot, lb=login_btn:
+            self._login_playwright(p, sl, sd, lb)
+        )
+        btns.addWidget(login_btn)
 
-            save_btn = QPushButton("Save")
-            save_btn.clicked.connect(
-                lambda: self._save_ebay_creds(id_edit.text(), secret_edit.text())
-            )
-            bottom.addWidget(save_btn)
+        open_btn = QPushButton("Open in Browser")
+        open_btn.setToolTip(
+            f"Opens {label} in your normal browser. Log in if needed, "
+            "then click 'Import Session'."
+        )
+        open_btn.clicked.connect(
+            lambda checked=False, p=platform, sl=status_lbl:
+            self._open_in_browser(p, sl)
+        )
+        btns.addWidget(open_btn)
 
-            auth_btn = QPushButton("Authorize Seller")
-            auth_btn.setObjectName("primaryButton")
-            auth_btn.setToolTip(
-                "Opens eBay in your browser to grant seller access.\n"
-                "Requires http://localhost:9735/oauth/callback to be registered\n"
-                "as a redirect URI in your eBay Developer Portal app settings."
-            )
-            auth_btn.clicked.connect(
-                lambda: self._ebay_authorize(auth_btn, status_lbl, status_dot)
-            )
-            bottom.addWidget(auth_btn)
+        import_btn = QPushButton("Import Session")
+        import_btn.setToolTip(
+            "Reads your existing login cookies from Chrome/Edge/Firefox automatically.\n"
+            "If this fails with a permissions or encryption error, use 'Login (Browser)' instead."
+        )
+        import_btn.clicked.connect(
+            lambda checked=False, p=platform, sl=status_lbl, sd=dot, ib=import_btn:
+            self._import_session(p, sl, sd, ib)
+        )
+        btns.addWidget(import_btn)
 
-        else:
-            email_edit = QLineEdit()
-            email_edit.setPlaceholderText("Email (optional — for reference)")
-            email_edit.setFixedWidth(180)
-            pw_edit = QLineEdit()
-            pw_edit.setPlaceholderText("Password")
-            pw_edit.setEchoMode(QLineEdit.Password)
-            pw_edit.setFixedWidth(130)
-            bottom.addWidget(email_edit)
-            bottom.addWidget(pw_edit)
+        file_btn = QPushButton("Import from File…")
+        file_btn.setToolTip(
+            "Import cookies from a file exported by the 'Get cookies.txt LOCALLY' "
+            "or 'Cookie-Editor' extension. No admin rights needed."
+        )
+        file_btn.clicked.connect(
+            lambda checked=False, p=platform, sl=status_lbl, sd=dot:
+            self._import_from_file(p, sl, sd)
+        )
+        btns.addWidget(file_btn)
 
-            login_btn = QPushButton("Login")
-            login_btn.setObjectName("primaryButton")
-            login_btn.setToolTip(
-                "Opens a browser window so you can log in manually.\n"
-                "MFA / 2FA and captchas work normally in this window.\n"
-                "The session is saved automatically once you're logged in."
-            )
-            login_btn.clicked.connect(
-                lambda p=platform, e=email_edit, pw=pw_edit,
-                       lb=login_btn, sl=session_lbl:
-                self._platform_login(p, e.text(), pw.text(), lb, sl)
-            )
-            bottom.addWidget(login_btn)
-
-            clear_btn = QPushButton("Clear Session")
-            clear_btn.setToolTip("Delete the saved login session.")
-            clear_btn.clicked.connect(
-                lambda p=platform, sl=session_lbl: self._clear_session(p, sl)
-            )
-            bottom.addWidget(clear_btn)
-
-        bottom.addStretch()
+        btns.addStretch()
 
         test_btn = QPushButton("Test")
         test_btn.clicked.connect(
-            lambda p=platform, sl=status_lbl, sd=status_dot:
-            self._test_platform(p, sl, sd)
+            lambda checked=False, p=platform, sl=status_lbl, sd=dot:
+            self._test_platform_async(p, sl, sd)
         )
-        bottom.addWidget(test_btn)
+        btns.addWidget(test_btn)
 
         sync_btn = QPushButton("Sync")
-        sync_btn.clicked.connect(lambda p=platform: self._sync_platform(p))
-        bottom.addWidget(sync_btn)
+        sync_btn.clicked.connect(lambda checked=False, p=platform: self._sync_platform(p))
+        btns.addWidget(sync_btn)
 
-        row_layout.addLayout(bottom)
+        logout_btn = QPushButton("Log Out")
+        logout_btn.clicked.connect(
+            lambda checked=False, p=platform, sl=status_lbl, sd=dot:
+            self._logout_platform(p, sl, sd)
+        )
+        btns.addWidget(logout_btn)
 
-        return {
-            "widget": container,
-            "status_label": status_lbl,
-            "status_dot": status_dot,
-            "session_label": session_lbl,
-            "last_sync": last_sync,
-        }
+        col.addLayout(btns)
 
-    # ── Data loading ──────────────────────────────────────────────────────────
+        return {"widget": container, "status_label": status_lbl,
+                "status_dot": dot, "last_sync": last_lbl}
+
+    # ── Settings loading ──────────────────────────────────────────────────
 
     def _load_settings(self):
         last = get_setting("last_sync_time", "Never")
@@ -281,21 +298,11 @@ class SettingsView(QWidget):
 
         for p, row in self._platform_rows.items():
             last_p = get_setting(f"last_sync_{p}", "")
-            row["last_sync"].setText(f"Last: {last_p}" if last_p else "")
-
-        # Update session badges for browser-based platforms
-        from app.services.session_manager import has_session
-        for p in ("mercari", "poshmark"):
-            self._refresh_session_badge(p)
-
-        # eBay seller token status
-        from app.services.ebay_service import EbayService
-        svc = EbayService()
-        row = self._platform_rows["ebay"]
-        if svc.has_seller_access():
-            row["session_label"].setText("Seller: Authorized")
-        else:
-            row["session_label"].setText("Seller: Not authorized")
+            row["last_sync"].setText(f"Last synced: {last_p}" if last_p else "")
+            svc = self._get_service(p)
+            if svc.has_session():
+                self._set_dot(row["status_dot"], "ok")
+                row["status_label"].setText("Connected — ready to sync")
 
         sched = get_setting("backup_schedule", "Disabled")
         idx = self.backup_schedule.findText(sched)
@@ -309,140 +316,183 @@ class SettingsView(QWidget):
         if os.path.exists(token):
             self.gdrive_status.setText("Google Drive: Connected")
 
-    def _refresh_session_badge(self, platform: str):
-        from app.services.session_manager import has_session
-        row = self._platform_rows[platform]
-        if has_session(platform):
-            row["session_label"].setText("● Session active")
-            row["session_label"].setStyleSheet("color: #4caf50;")
-        else:
-            row["session_label"].setText("○ Not logged in")
-            row["session_label"].setStyleSheet("color: #f44336;")
+    # ── Platform helpers ──────────────────────────────────────────────────
 
-    # ── Platform credential actions ───────────────────────────────────────────
+    @staticmethod
+    def _get_service(platform: str):
+        if platform == "ebay":
+            from app.services.ebay_service import EbayService
+            return EbayService()
+        if platform == "mercari":
+            from app.services.mercari_service import MercariService
+            return MercariService()
+        from app.services.poshmark_service import PoshmarkService
+        return PoshmarkService()
 
-    def _save_ebay_creds(self, client_id: str, secret: str):
-        if not client_id or not secret:
-            QMessageBox.warning(self, "eBay", "Please enter both Client ID and Client Secret.")
+    def _set_dot(self, dot: QLabel, state: str):
+        name = {"ok": "statusDotOk", "error": "statusDotError"}.get(state, "statusDotUnknown")
+        dot.setObjectName(name)
+        dot.style().unpolish(dot)
+        dot.style().polish(dot)
+        dot.update()
+
+    # ── Login (Playwright browser) — the primary fix ──────────────────────
+
+    def _login_playwright(self, platform: str, status_lbl: QLabel,
+                          dot: QLabel, login_btn: QPushButton):
+        """Open Playwright's own headed browser for login. Works with MFA/2FA."""
+        svc = self._get_service(platform)
+        if not hasattr(svc, "login"):
+            QMessageBox.information(
+                self, f"{PLATFORM_DISPLAY[platform]} Login",
+                f"{PLATFORM_DISPLAY[platform]} uses 'Open in Browser' + 'Import Session'.\n"
+                "Log in in your system browser, then click Import Session."
+            )
             return
-        from app.services.ebay_service import EbayService
-        EbayService().save_credentials(client_id, secret)
-        QMessageBox.information(self, "eBay", "Credentials saved.")
-
-    def _ebay_authorize(self, btn: QPushButton, status_lbl: QLabel, status_dot: QLabel):
-        btn.setEnabled(False)
-        btn.setText("Authorizing…")
-        status_lbl.setText("Waiting for eBay authorization…")
-
-        from app.services.ebay_service import EbayService
-
-        def _done(ok: bool, err: str | None):
-            def _update():
-                btn.setEnabled(True)
-                btn.setText("Authorize Seller")
-                if ok:
-                    status_lbl.setText("Seller access authorized")
-                    status_dot.setObjectName("statusDotOk")
-                    self._platform_rows["ebay"]["session_label"].setText("Seller: Authorized")
-                else:
-                    status_lbl.setText(f"Auth failed: {err}")
-                    status_dot.setObjectName("statusDotError")
-                status_dot.style().unpolish(status_dot)
-                status_dot.style().polish(status_dot)
-            QTimer.singleShot(0, _update)
-
-        EbayService().start_oauth_flow(done_cb=_done)
-
-    def _platform_login(self, platform: str, email: str, password: str,
-                        login_btn: QPushButton, session_lbl: QLabel):
-        # Optionally persist credentials for user reference
-        if email and password:
-            if platform == "mercari":
-                from app.services.mercari_service import MercariService
-                MercariService().save_credentials(email, password)
-            else:
-                from app.services.poshmark_service import PoshmarkService
-                PoshmarkService().save_credentials(email, password)
 
         login_btn.setEnabled(False)
         login_btn.setText("Browser opening…")
-        session_lbl.setText("Waiting for login…")
-        session_lbl.setStyleSheet("color: #ff9800;")
+        status_lbl.setText("Waiting — log in and the app will detect it automatically…")
+        self._set_dot(dot, "unknown")
 
-        def _done(ok: bool, err: str | None):
+        def _done(ok: bool, msg: str | None):
             def _update():
                 login_btn.setEnabled(True)
-                login_btn.setText("Login")
+                login_btn.setText("Login (Browser)")
                 if ok:
-                    self._refresh_session_badge(platform)
+                    self._set_dot(dot, "ok")
+                    status_lbl.setText("Connected — session saved")
                     QMessageBox.information(
                         self,
-                        PLATFORM_DISPLAY[platform],
-                        f"Logged in successfully! Your {PLATFORM_DISPLAY[platform]} "
-                        "session has been saved.",
+                        f"{PLATFORM_DISPLAY[platform]} — Logged In",
+                        f"Session saved successfully.\n\nYou can now click Sync to fetch your listings.",
                     )
                 else:
-                    session_lbl.setText("Login failed")
-                    session_lbl.setStyleSheet("color: #f44336;")
+                    self._set_dot(dot, "error")
+                    status_lbl.setText("Login failed — see error")
                     QMessageBox.warning(
-                        self, f"{PLATFORM_DISPLAY[platform]} Login",
-                        f"Login failed:\n{err}",
+                        self, f"{PLATFORM_DISPLAY[platform]} — Login Failed",
+                        str(msg or "Unknown error"),
                     )
-            QTimer.singleShot(0, _update)
+            post_to_main(_update)
 
-        if platform == "mercari":
-            from app.services.mercari_service import MercariService
-            MercariService().login(done_cb=_done)
-        else:
-            from app.services.poshmark_service import PoshmarkService
-            PoshmarkService().login(done_cb=_done)
+        svc.login(done_cb=_done)
 
-    def _clear_session(self, platform: str, session_lbl: QLabel):
-        reply = QMessageBox.question(
-            self,
-            "Clear Session",
-            f"Delete the saved {PLATFORM_DISPLAY[platform]} session?\n"
-            "You will need to log in again before the next sync.",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
+    # ── Open in browser (system browser fallback) ─────────────────────────
+
+    def _open_in_browser(self, platform: str, status_lbl: QLabel):
+        svc = self._get_service(platform)
+        svc.open_in_browser()
+        status_lbl.setText(
+            f"Opened in your browser — log in, then click Import Session"
         )
-        if reply == QMessageBox.Yes:
-            from app.services.session_manager import clear_session
-            clear_session(platform)
-            self._refresh_session_badge(platform)
 
-    def _test_platform(self, platform: str, status_lbl: QLabel, status_dot: QLabel):
+    # ── Import session ────────────────────────────────────────────────────
+
+    def _import_session(self, platform: str, status_lbl: QLabel,
+                        dot: QLabel, import_btn: QPushButton):
+        import_btn.setEnabled(False)
+        status_lbl.setText("Reading cookies from your browser…")
+        self._set_dot(dot, "unknown")
+
+        svc = self._get_service(platform)
+
+        def _done(ok: bool, msg: str):
+            post_to_main(lambda: self._on_import_done(ok, msg, platform, status_lbl, dot, import_btn))
+
+        svc.import_session(done_cb=_done)
+
+    def _on_import_done(self, ok: bool, msg: str, platform: str,
+                        status_lbl: QLabel, dot: QLabel, import_btn: QPushButton):
+        import_btn.setEnabled(True)
+        if ok:
+            self._set_dot(dot, "ok")
+            status_lbl.setText("Connected — session imported")
+            QMessageBox.information(
+                self, f"{PLATFORM_DISPLAY[platform]} — Session Imported",
+                f"✓ {msg}\n\nYou can now click Sync to fetch your listings."
+            )
+        else:
+            self._set_dot(dot, "error")
+            status_lbl.setText("Import failed — see error for details")
+            QMessageBox.warning(
+                self, f"{PLATFORM_DISPLAY[platform]} — Import Failed",
+                msg
+            )
+
+    def _import_from_file(self, platform: str, status_lbl: QLabel, dot: QLabel):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            f"Import {PLATFORM_DISPLAY[platform]} Cookies",
+            "",
+            "Cookie Files (*.txt *.json);;All Files (*)"
+        )
+        if not path:
+            return
+
+        svc = self._get_service(platform)
+        ok, msg = svc.import_from_file(path)
+        if ok:
+            self._set_dot(dot, "ok")
+            status_lbl.setText("Connected — session imported from file")
+            QMessageBox.information(
+                self, f"{PLATFORM_DISPLAY[platform]} — Imported",
+                f"✓ {msg}\n\nYou can now click Sync to fetch your listings."
+            )
+        else:
+            self._set_dot(dot, "error")
+            status_lbl.setText("Import failed")
+            QMessageBox.warning(self, f"{PLATFORM_DISPLAY[platform]} — Import Failed", msg)
+
+    def _logout_platform(self, platform: str, status_lbl: QLabel, dot: QLabel):
+        svc = self._get_service(platform)
+        if hasattr(svc, "clear_session"):
+            svc.clear_session()
+        self._set_dot(dot, "unknown")
+        status_lbl.setText("Logged out — click Login (Browser) or Import Session to reconnect")
+
+    # ── Test (runs in background thread) ─────────────────────────────────
+
+    def _test_platform_async(self, platform: str, status_lbl: QLabel, dot: QLabel):
         status_lbl.setText("Testing…")
-        try:
-            if platform == "ebay":
-                from app.services.ebay_service import EbayService
-                ok, msg = EbayService().test_connection()
-            elif platform == "mercari":
-                from app.services.mercari_service import MercariService
-                ok, msg = MercariService().test_connection()
-            else:
-                from app.services.poshmark_service import PoshmarkService
-                ok, msg = PoshmarkService().test_connection()
-        except Exception as e:
-            ok, msg = False, str(e)
+        self._set_dot(dot, "unknown")
 
+        def _run():
+            svc = self._get_service(platform)
+            try:
+                ok, msg = svc.test_connection()
+            except Exception as e:
+                ok, msg = False, str(e)
+            post_to_main(lambda: self._on_test_done(ok, msg, platform, status_lbl, dot))
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _on_test_done(self, ok: bool, msg: str, platform: str,
+                      status_lbl: QLabel, dot: QLabel):
+        self._set_dot(dot, "ok" if ok else "error")
         status_lbl.setText(msg)
-        status_dot.setObjectName("statusDotOk" if ok else "statusDotError")
-        status_dot.style().unpolish(status_dot)
-        status_dot.style().polish(status_dot)
+        if ok:
+            QMessageBox.information(
+                self, f"{PLATFORM_DISPLAY[platform]} — Connection Test", f"✓ {msg}"
+            )
+        else:
+            QMessageBox.warning(
+                self, f"{PLATFORM_DISPLAY[platform]} — Connection Test", f"✗ {msg}"
+            )
+
+    # ── Sync ──────────────────────────────────────────────────────────────
 
     def _sync_platform(self, platform: str):
         self.sync_btn.setEnabled(False)
         self.sync_progress.show()
         self.sync_progress.setRange(0, 0)
-        self.sync_status.setText(f"Syncing {platform}…")
+        self.sync_status.setText(f"Syncing {PLATFORM_DISPLAY[platform]}…")
 
         from app.services.sync_service import sync_platform
         sync_platform(
             platform,
-            done_cb=lambda ok, count, err: QTimer.singleShot(
-                0, lambda: self._on_sync_done(ok, count, err)
-            ),
+            done_cb=lambda ok, count, err:
+            post_to_main(lambda: self._on_sync_done(ok, count, err))
         )
 
     def _force_sync(self):
@@ -452,18 +502,15 @@ class SettingsView(QWidget):
         self.sync_status.setText("Syncing all platforms…")
 
         from app.services.sync_service import sync_all
-        sync_all(
-            done_cb=lambda total, errors: QTimer.singleShot(
-                0, lambda: self._on_all_sync_done(total, errors)
-            )
-        )
+        sync_all(done_cb=lambda total, errors:
+                 post_to_main(lambda: self._on_all_sync_done(total, errors)))
 
     def _on_sync_done(self, ok: bool, count: int, err: str | None):
         self.sync_btn.setEnabled(True)
         self.sync_progress.hide()
-        self.sync_status.setText(
-            f"Synced {count} listing(s)." if ok else f"Error: {err}"
-        )
+        self.sync_status.setText(f"Synced {count} listing(s)." if ok else f"Error: {err}")
+        if not ok:
+            QMessageBox.warning(self, "Sync Error", f"Sync failed:\n\n{err}")
         self._load_settings()
 
     def _on_all_sync_done(self, total: int, errors: list):
@@ -471,32 +518,42 @@ class SettingsView(QWidget):
         self.sync_progress.hide()
         msg = f"Sync complete: {total} listing(s)."
         if errors:
-            msg += " Errors: " + "; ".join(errors)
-        self.sync_status.setText(msg)
+            msg += "\n\nErrors:\n" + "\n".join(errors)
+            QMessageBox.warning(self, "Sync Complete with Errors", msg)
+        else:
+            self.sync_status.setText(msg)
         self._load_settings()
 
-    # ── Update actions ────────────────────────────────────────────────────────
+    # ── Update ────────────────────────────────────────────────────────────
 
     def _check_update(self):
         self.update_btn.setEnabled(False)
         self.update_status.setText("Checking…")
 
         def _check():
-            from app.services.updater_service import check_for_update
-            available, latest = check_for_update()
-            QTimer.singleShot(0, lambda: self._on_update_check(available, latest))
+            available, latest, error = False, VERSION, None
+            try:
+                from app.services.updater_service import check_for_update
+                available, latest = check_for_update()
+            except Exception as e:
+                error = str(e)
+            finally:
+                post_to_main(lambda: self._on_update_check(available, latest, error))
 
-        import threading
         threading.Thread(target=_check, daemon=True).start()
 
-    def _on_update_check(self, available: bool, latest: str):
+    def _on_update_check(self, available: bool, latest: str, error: str | None):
         self.update_btn.setEnabled(True)
-        if available:
+        if error:
+            self.update_status.setText("Could not check for updates.")
+            QMessageBox.warning(self, "Update Check Failed",
+                                f"Could not reach GitHub:\n\n{error}")
+        elif available:
             self.update_status.setText(f"Update available: v{latest}")
             reply = QMessageBox.question(
                 self, "Update Available",
                 f"Version {latest} is available. Download and install now?",
-                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes | QMessageBox.No
             )
             if reply == QMessageBox.Yes:
                 self._do_update()
@@ -504,34 +561,50 @@ class SettingsView(QWidget):
             self.update_status.setText(f"You're up to date (v{VERSION}).")
 
     def _do_update(self):
-        from app.services.updater_service import get_latest_release, download_and_apply_update
+        from app.services.updater_service import (
+            get_latest_release, find_update_asset, download_and_apply_update
+        )
         release = get_latest_release()
         if not release:
             QMessageBox.critical(self, "Update", "Could not fetch release info.")
             return
-        assets = release.get("assets", [])
-        zip_asset = next((a for a in assets if a["name"].endswith(".zip")), None)
-        if not zip_asset:
-            QMessageBox.critical(self, "Update", "No zip asset found in release.")
+        asset = find_update_asset(release)
+        if not asset:
+            QMessageBox.critical(self, "Update",
+                                 "No installer found in the release assets.\n"
+                                 "Please download manually from GitHub.")
             return
 
         self.update_progress.show()
         self.update_progress.setValue(0)
 
         def _progress(pct):
-            QTimer.singleShot(0, lambda: self.update_progress.setValue(pct))
+            post_to_main(lambda: self.update_progress.setValue(pct))
 
         def _done(ok, err):
-            QTimer.singleShot(0, lambda: (
-                self.update_progress.hide(),
-                QMessageBox.information(self, "Update", "Update applied. Restarting…") if ok
-                else QMessageBox.critical(self, "Update Failed", str(err))
-            ))
+            if ok:
+                post_to_main(lambda: (
+                    self.update_progress.hide(),
+                    QMessageBox.information(
+                        self, "Update",
+                        "The installer is running in the background.\n"
+                        "The app will close and reopen when the update finishes."
+                    )
+                ))
+            else:
+                post_to_main(lambda: (
+                    self.update_progress.hide(),
+                    QMessageBox.critical(self, "Update Failed", str(err))
+                ))
 
-        download_and_apply_update(zip_asset["browser_download_url"],
-                                  progress_cb=_progress, done_cb=_done)
+        download_and_apply_update(
+            asset["browser_download_url"],
+            asset["name"],
+            progress_cb=_progress,
+            done_cb=_done,
+        )
 
-    # ── Backup actions ────────────────────────────────────────────────────────
+    # ── Backup ────────────────────────────────────────────────────────────
 
     def _connect_gdrive(self):
         try:
@@ -551,9 +624,8 @@ class SettingsView(QWidget):
             self.backup_status.setText("Uploading to Google Drive…")
             upload_backup_to_drive(
                 tmp,
-                done_cb=lambda ok, err: QTimer.singleShot(
-                    0, lambda: self._on_backup_done(ok, err)
-                ),
+                done_cb=lambda ok, err:
+                post_to_main(lambda: self._on_backup_done(ok, err))
             )
         except Exception as e:
             self.backup_status.setText(f"Backup failed: {e}")
@@ -588,7 +660,7 @@ class SettingsView(QWidget):
         reply = QMessageBox.warning(
             self, "Import Backup",
             "This will REPLACE all current data. Continue?",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
         )
         if reply != QMessageBox.Yes:
             return
