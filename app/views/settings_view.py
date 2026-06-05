@@ -4,7 +4,7 @@ import threading
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QLineEdit, QGroupBox, QScrollArea, QMessageBox,
+    QGroupBox, QScrollArea, QMessageBox,
     QComboBox, QProgressBar, QFileDialog, QFrame
 )
 from PySide6.QtCore import Qt
@@ -66,30 +66,6 @@ class SettingsView(QWidget):
             conn_layout.addWidget(row["widget"])
 
         layout.addWidget(conn_group)
-
-        # ── Sync ──────────────────────────────────────────────────────────
-        sync_group = QGroupBox("Sync")
-        sync_layout = QVBoxLayout(sync_group)
-
-        sync_row = QHBoxLayout()
-        self.last_sync_label = QLabel("Last sync: Never")
-        sync_row.addWidget(self.last_sync_label)
-        sync_row.addStretch()
-
-        self.sync_btn = QPushButton("Force Sync All")
-        self.sync_btn.setObjectName("primaryButton")
-        self.sync_btn.clicked.connect(self._force_sync)
-        sync_row.addWidget(self.sync_btn)
-        sync_layout.addLayout(sync_row)
-
-        self.sync_progress = QProgressBar()
-        self.sync_progress.setTextVisible(False)
-        self.sync_progress.hide()
-        sync_layout.addWidget(self.sync_progress)
-
-        self.sync_status = QLabel("")
-        sync_layout.addWidget(self.sync_status)
-        layout.addWidget(sync_group)
 
         # ── Auto-Update ───────────────────────────────────────────────────
         update_group = QGroupBox("App Updates")
@@ -274,10 +250,6 @@ class SettingsView(QWidget):
         )
         btns.addWidget(test_btn)
 
-        sync_btn = QPushButton("Sync")
-        sync_btn.clicked.connect(lambda checked=False, p=platform: self._sync_platform(p))
-        btns.addWidget(sync_btn)
-
         logout_btn = QPushButton("Log Out")
         logout_btn.clicked.connect(
             lambda checked=False, p=platform, sl=status_lbl, sd=dot:
@@ -293,9 +265,6 @@ class SettingsView(QWidget):
     # ── Settings loading ──────────────────────────────────────────────────
 
     def _load_settings(self):
-        last = get_setting("last_sync_time", "Never")
-        self.last_sync_label.setText(f"Last sync: {last}")
-
         for p, row in self._platform_rows.items():
             last_p = get_setting(f"last_sync_{p}", "")
             row["last_sync"].setText(f"Last synced: {last_p}" if last_p else "")
@@ -479,50 +448,6 @@ class SettingsView(QWidget):
             QMessageBox.warning(
                 self, f"{PLATFORM_DISPLAY[platform]} — Connection Test", f"✗ {msg}"
             )
-
-    # ── Sync ──────────────────────────────────────────────────────────────
-
-    def _sync_platform(self, platform: str):
-        self.sync_btn.setEnabled(False)
-        self.sync_progress.show()
-        self.sync_progress.setRange(0, 0)
-        self.sync_status.setText(f"Syncing {PLATFORM_DISPLAY[platform]}…")
-
-        from app.services.sync_service import sync_platform
-        sync_platform(
-            platform,
-            done_cb=lambda ok, count, err:
-            post_to_main(lambda: self._on_sync_done(ok, count, err))
-        )
-
-    def _force_sync(self):
-        self.sync_btn.setEnabled(False)
-        self.sync_progress.show()
-        self.sync_progress.setRange(0, 0)
-        self.sync_status.setText("Syncing all platforms…")
-
-        from app.services.sync_service import sync_all
-        sync_all(done_cb=lambda total, errors:
-                 post_to_main(lambda: self._on_all_sync_done(total, errors)))
-
-    def _on_sync_done(self, ok: bool, count: int, err: str | None):
-        self.sync_btn.setEnabled(True)
-        self.sync_progress.hide()
-        self.sync_status.setText(f"Synced {count} listing(s)." if ok else f"Error: {err}")
-        if not ok:
-            QMessageBox.warning(self, "Sync Error", f"Sync failed:\n\n{err}")
-        self._load_settings()
-
-    def _on_all_sync_done(self, total: int, errors: list):
-        self.sync_btn.setEnabled(True)
-        self.sync_progress.hide()
-        msg = f"Sync complete: {total} listing(s)."
-        if errors:
-            msg += "\n\nErrors:\n" + "\n".join(errors)
-            QMessageBox.warning(self, "Sync Complete with Errors", msg)
-        else:
-            self.sync_status.setText(msg)
-        self._load_settings()
 
     # ── Update ────────────────────────────────────────────────────────────
 

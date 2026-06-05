@@ -7,6 +7,8 @@ from PySide6.QtGui import QIcon, QPixmap
 
 from app.database.models import get_setting
 from app.views.inventory_view import InventoryView
+from app.views.sync_view import SyncView
+from app.views.import_view import ImportView
 from app.views.reports_view import ReportsView
 from app.views.settings_view import SettingsView
 from app.views.notifications_view import NotificationsView
@@ -14,9 +16,11 @@ from version import VERSION
 
 NAV = [
     ("Inventory", "inventory", 0),
-    ("Reports",   "reports",   1),
-    ("Alerts",    "alerts",    2),
-    ("Settings",  "settings",  3),
+    ("Sync",      "sync",      1),
+    ("Import",    "import",    2),
+    ("Reports",   "reports",   3),
+    ("Alerts",    "alerts",    4),
+    ("Settings",  "settings",  5),
 ]
 
 
@@ -46,14 +50,18 @@ class MainWindow(QMainWindow):
 
         self.stack = QStackedWidget()
         self.inventory_view = InventoryView()
+        self.sync_view = SyncView()
+        self.import_view = ImportView()
         self.reports_view = ReportsView()
         self.notifications_view = NotificationsView()
         self.settings_view = SettingsView()
 
-        self.stack.addWidget(self.inventory_view)   # 0
-        self.stack.addWidget(self.reports_view)      # 1
-        self.stack.addWidget(self.notifications_view) # 2
-        self.stack.addWidget(self.settings_view)     # 3
+        self.stack.addWidget(self.inventory_view)     # 0
+        self.stack.addWidget(self.sync_view)          # 1
+        self.stack.addWidget(self.import_view)        # 2
+        self.stack.addWidget(self.reports_view)       # 3
+        self.stack.addWidget(self.notifications_view) # 4
+        self.stack.addWidget(self.settings_view)      # 5
         root.addWidget(self.stack, 1)
 
         self.status_bar = QStatusBar()
@@ -127,6 +135,8 @@ class MainWindow(QMainWindow):
             btn.setChecked(n == name)
         if name == "inventory":
             self.inventory_view.refresh()
+        elif name == "sync":
+            self.sync_view.refresh()
         elif name == "alerts":
             self.notifications_view.refresh()
 
