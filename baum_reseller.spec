@@ -69,7 +69,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,              # add assets/icon.ico here when you have one
+    icon='assets/icon.ico',
 )
 
 coll = COLLECT(

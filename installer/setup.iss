@@ -1,5 +1,5 @@
 #define MyAppName      "Baum Reseller"
-#define MyAppVersion   "1.2.5"
+#define MyAppVersion   "1.3.1"
 #define MyAppPublisher "Bruiserbaum"
 #define MyAppURL       "https://github.com/Bruiserbaum/Baum-Reseller"
 #define MyAppExeName   "BaumReseller.exe"
@@ -19,7 +19,7 @@ AllowNoIcons=yes
 LicenseFile=..\LICENSE
 OutputDir=..\dist
 OutputBaseFilename=BaumResellerSetup
-SetupIconFile=
+SetupIconFile=..\assets\icon.ico
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
@@ -48,7 +48,10 @@ Name: "{commondesktop}\{#MyAppName}";   Filename: "{app}\{#MyAppExeName}"; Tasks
 Name: "{userstartup}\{#MyAppName}";     Filename: "{app}\{#MyAppExeName}"; Tasks: startupicon
 
 [Run]
+; Interactive install: show "Launch" checkbox on the Finished page
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+; Silent auto-update: always relaunch after the update completes
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait; Check: WizardSilent
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}"

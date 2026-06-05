@@ -3,6 +3,7 @@ from PySide6.QtWidgets import (
     QPushButton, QStackedWidget, QLabel, QStatusBar
 )
 from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QIcon, QPixmap
 
 from app.database.models import get_setting
 from app.views.inventory_view import InventoryView
@@ -25,6 +26,15 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Baum Reseller")
         self.setMinimumSize(1100, 680)
         self.resize(1340, 820)
+
+        # ── Window icon ────────────────────────────────────────────────────
+        import os
+        _base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        for _name in ("icon.ico", "icon.png"):
+            _p = os.path.join(_base, "assets", _name)
+            if os.path.exists(_p):
+                self.setWindowIcon(QIcon(_p))
+                break
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -73,6 +83,19 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
+
+        # ── Logo image ─────────────────────────────────────────────────────
+        import os
+        _base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        _logo_path = os.path.join(_base, "assets", "icon.png")
+        if os.path.exists(_logo_path):
+            logo_label = QLabel()
+            logo_label.setAlignment(Qt.AlignCenter)
+            pix = QPixmap(_logo_path).scaled(72, 72, Qt.KeepAspectRatio,
+                                             Qt.SmoothTransformation)
+            logo_label.setPixmap(pix)
+            logo_label.setContentsMargins(0, 16, 0, 4)
+            layout.addWidget(logo_label)
 
         title = QLabel("Baum\nReseller")
         title.setObjectName("sidebarTitle")

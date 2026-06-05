@@ -18,7 +18,7 @@ QLabel#sidebarTitle {
     color: #cba6f7;
     font-size: 20px;
     font-weight: bold;
-    padding: 28px 12px 20px 12px;
+    padding: 4px 12px 20px 12px;
     border-bottom: 1px solid #313244;
 }
 

@@ -1,10 +1,18 @@
 import sys
 import os
 
+# ── Playwright browser path (MUST be set before any Playwright import) ────────
+# When frozen by PyInstaller the default path is inside the read-only
+# _internal dir (C:\Program Files\…\BaumReseller\_internal\…).
+# Redirect to a user-writable location so `playwright install` can write there.
+_PLAYWRIGHT_BROWSERS = os.path.join(
+    os.path.expanduser("~"), ".baum-reseller", "playwright-browsers"
+)
+os.environ["PLAYWRIGHT_BROWSERS_PATH"] = _PLAYWRIGHT_BROWSERS
+
 
 def main():
     # ── Silent cookie-extraction mode (runs as admin via UAC, no UI) ──────
-    # When elevated via ShellExecuteW, this exits before Qt ever starts.
     if "--cookie-extract" in sys.argv:
         _run_cookie_extract()
         return
@@ -17,11 +25,19 @@ def main():
     init_db()
 
     from PySide6.QtWidgets import QApplication
+    from PySide6.QtGui import QIcon
     from app.main_window import MainWindow
 
     app = QApplication(sys.argv)
     app.setApplicationName("Baum Reseller")
     app.setOrganizationName("Baum")
+
+    # ── Window / taskbar icon ──────────────────────────────────────────────
+    icon_path = os.path.join(os.path.dirname(__file__), "assets", "icon.ico")
+    if not os.path.exists(icon_path):
+        icon_path = os.path.join(os.path.dirname(__file__), "assets", "icon.png")
+    if os.path.exists(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
 
     from app.utils.qt_thread import init_bridge
     init_bridge()
@@ -34,7 +50,69 @@ def main():
     window = MainWindow()
     window.show()
 
+    # ── Playwright browser check (background, silent) ─────────────────────
+    # Install Chromium into ~/.baum-reseller/playwright-browsers if missing.
+    # Runs silently; user only sees an error if they try to sync and it failed.
+    from PySide6.QtCore import QTimer
+    QTimer.singleShot(4_000, _ensure_playwright_browsers_bg)
+
     sys.exit(app.exec())
+
+
+def _ensure_playwright_browsers_bg():
+    """
+    Background Playwright browser install — called once at startup.
+    Silently installs Chromium into PLAYWRIGHT_BROWSERS_PATH if it is missing.
+    """
+    import threading
+
+    def _worker():
+        try:
+            if _chromium_installed():
+                return
+            _install_playwright_browsers()
+        except Exception:
+            pass  # Errors will surface when the user tries to sync
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+
+def _chromium_installed() -> bool:
+    """Return True if a Playwright Chromium binary exists in the browsers dir."""
+    import glob
+    browsers_dir = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
+    if not browsers_dir or not os.path.isdir(browsers_dir):
+        return False
+    patterns = [
+        os.path.join(browsers_dir, "chromium*", "**", "chrome.exe"),
+        os.path.join(browsers_dir, "chromium*", "**", "chrome-headless-shell.exe"),
+        os.path.join(browsers_dir, "chromium*", "**", "chromium.exe"),
+    ]
+    return any(glob.glob(p, recursive=True) for p in patterns)
+
+
+def _install_playwright_browsers() -> tuple[bool, str]:
+    """Run `playwright install chromium` and return (success, message)."""
+    import subprocess
+
+    env = os.environ.copy()
+    env["PLAYWRIGHT_BROWSERS_PATH"] = _PLAYWRIGHT_BROWSERS
+
+    if getattr(sys, "frozen", False):
+        # PyInstaller bundle: use the playwright.exe driver bundled in _internal
+        internal = os.path.join(os.path.dirname(sys.executable), "_internal")
+        driver = os.path.join(internal, "playwright", "driver", "playwright.exe")
+        if not os.path.exists(driver):
+            return False, f"Playwright driver not found: {driver}"
+        cmd = [driver, "install", "chromium"]
+    else:
+        # Development: use the installed playwright package
+        cmd = [sys.executable, "-m", "playwright", "install", "chromium"]
+
+    result = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=300)
+    if result.returncode == 0:
+        return True, "Chromium installed."
+    return False, (result.stderr or result.stdout or "Unknown error").strip()
 
 
 def _run_cookie_extract():
@@ -58,8 +136,6 @@ def _run_cookie_extract():
     try:
         from app.utils.browser import _do_import
         ok, msg = _do_import(domain, state_file)
-        # Strip sentinel so the main process can distinguish "also failed elevated"
-        # from a plain error without trying to elevate again infinitely.
         if not ok and msg.startswith("_NEEDS_ELEVATION_:"):
             msg = "_NEEDS_ELEVATION_:" + msg[len("_NEEDS_ELEVATION_:"):]
     except Exception as e:
