@@ -9,6 +9,7 @@ from app.database.models import get_setting
 from app.views.inventory_view import InventoryView
 from app.views.sync_view import SyncView
 from app.views.import_view import ImportView
+from app.views.trending_view import TrendingView
 from app.views.reports_view import ReportsView
 from app.views.settings_view import SettingsView
 from app.views.notifications_view import NotificationsView
@@ -17,10 +18,11 @@ from version import VERSION
 NAV = [
     ("Inventory", "inventory", 0),
     ("Sync",      "sync",      1),
-    ("Import",    "import",    2),
-    ("Reports",   "reports",   3),
-    ("Alerts",    "alerts",    4),
-    ("Settings",  "settings",  5),
+    ("Trending",  "trending",  2),
+    ("Import",    "import",    3),
+    ("Reports",   "reports",   4),
+    ("Alerts",    "alerts",    5),
+    ("Settings",  "settings",  6),
 ]
 
 
@@ -51,6 +53,7 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.inventory_view = InventoryView()
         self.sync_view = SyncView()
+        self.trending_view = TrendingView()
         self.import_view = ImportView()
         self.reports_view = ReportsView()
         self.notifications_view = NotificationsView()
@@ -58,10 +61,11 @@ class MainWindow(QMainWindow):
 
         self.stack.addWidget(self.inventory_view)     # 0
         self.stack.addWidget(self.sync_view)          # 1
-        self.stack.addWidget(self.import_view)        # 2
-        self.stack.addWidget(self.reports_view)       # 3
-        self.stack.addWidget(self.notifications_view) # 4
-        self.stack.addWidget(self.settings_view)      # 5
+        self.stack.addWidget(self.trending_view)      # 2
+        self.stack.addWidget(self.import_view)        # 3
+        self.stack.addWidget(self.reports_view)       # 4
+        self.stack.addWidget(self.notifications_view) # 5
+        self.stack.addWidget(self.settings_view)      # 6
         root.addWidget(self.stack, 1)
 
         self.status_bar = QStatusBar()
