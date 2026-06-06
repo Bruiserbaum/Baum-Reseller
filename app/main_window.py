@@ -7,6 +7,7 @@ from PySide6.QtGui import QIcon, QPixmap
 
 from app.database.models import get_setting
 from app.views.inventory_view import InventoryView
+from app.views.containers_view import ContainersView
 from app.views.sync_view import SyncView
 from app.views.import_view import ImportView
 from app.views.trending_view import TrendingView
@@ -16,13 +17,14 @@ from app.views.notifications_view import NotificationsView
 from version import VERSION
 
 NAV = [
-    ("Inventory", "inventory", 0),
-    ("Sync",      "sync",      1),
-    ("Trending",  "trending",  2),
-    ("Import",    "import",    3),
-    ("Reports",   "reports",   4),
-    ("Alerts",    "alerts",    5),
-    ("Settings",  "settings",  6),
+    ("Inventory",  "inventory",   0),
+    ("Containers", "containers",  1),
+    ("Sync",       "sync",        2),
+    ("Trending",   "trending",    3),
+    ("Import",     "import",      4),
+    ("Reports",    "reports",     5),
+    ("Alerts",     "alerts",      6),
+    ("Settings",   "settings",    7),
 ]
 
 
@@ -52,6 +54,7 @@ class MainWindow(QMainWindow):
 
         self.stack = QStackedWidget()
         self.inventory_view = InventoryView()
+        self.containers_view = ContainersView()
         self.sync_view = SyncView()
         self.trending_view = TrendingView()
         self.import_view = ImportView()
@@ -60,12 +63,13 @@ class MainWindow(QMainWindow):
         self.settings_view = SettingsView()
 
         self.stack.addWidget(self.inventory_view)     # 0
-        self.stack.addWidget(self.sync_view)          # 1
-        self.stack.addWidget(self.trending_view)      # 2
-        self.stack.addWidget(self.import_view)        # 3
-        self.stack.addWidget(self.reports_view)       # 4
-        self.stack.addWidget(self.notifications_view) # 5
-        self.stack.addWidget(self.settings_view)      # 6
+        self.stack.addWidget(self.containers_view)    # 1
+        self.stack.addWidget(self.sync_view)          # 2
+        self.stack.addWidget(self.trending_view)      # 3
+        self.stack.addWidget(self.import_view)        # 4
+        self.stack.addWidget(self.reports_view)       # 5
+        self.stack.addWidget(self.notifications_view) # 6
+        self.stack.addWidget(self.settings_view)      # 7
         root.addWidget(self.stack, 1)
 
         self.status_bar = QStatusBar()
@@ -75,9 +79,11 @@ class MainWindow(QMainWindow):
         # Propagate badge changes from notifications view
         self.notifications_view.badge_changed.connect(self._update_alert_badge)
 
-        # After any sync or import, mark the inventory dirty so it reloads on next visit
+        # After any sync or import, mark inventory and containers dirty
         self.sync_view.sync_completed.connect(self.inventory_view.mark_dirty)
         self.import_view.import_completed.connect(self.inventory_view.mark_dirty)
+        self.sync_view.sync_completed.connect(self.containers_view.mark_dirty)
+        self.import_view.import_completed.connect(self.containers_view.mark_dirty)
 
         # Periodic status refresh
         status_timer = QTimer(self)
@@ -150,6 +156,8 @@ class MainWindow(QMainWindow):
             btn.setChecked(n == name)
         if name == "inventory":
             self.inventory_view.lazy_refresh()
+        elif name == "containers":
+            self.containers_view.lazy_refresh()
         elif name == "sync":
             self.sync_view.refresh()
         elif name == "alerts":
