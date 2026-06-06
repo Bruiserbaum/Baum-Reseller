@@ -5,7 +5,7 @@ import threading
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QGroupBox, QScrollArea, QMessageBox,
-    QComboBox, QProgressBar, QFileDialog, QFrame
+    QComboBox, QProgressBar, QFileDialog, QFrame, QLineEdit,
 )
 from PySide6.QtCore import Qt
 from app.utils.qt_thread import post_to_main
@@ -66,6 +66,60 @@ class SettingsView(QWidget):
             conn_layout.addWidget(row["widget"])
 
         layout.addWidget(conn_group)
+
+        # ── Anthropic API Key ─────────────────────────────────────────────
+        ai_group = QGroupBox("Trending & AI Insights")
+        ai_layout = QVBoxLayout(ai_group)
+
+        ai_note = QLabel(
+            "Baum Reseller uses Claude AI (by Anthropic) to generate weekly resale-market "
+            "trend reports. Enter your Anthropic API key below — it is stored securely in "
+            "your system keyring (Windows Credential Manager) and is never written to disk.\n\n"
+            "Get a key at: platform.anthropic.com → API Keys"
+        )
+        ai_note.setWordWrap(True)
+        ai_note.setStyleSheet("color: #a6adc8; font-size: 11px;")
+        ai_layout.addWidget(ai_note)
+
+        key_row = QHBoxLayout()
+        key_row.addWidget(QLabel("API Key:"))
+
+        self._api_key_field = QLineEdit()
+        self._api_key_field.setPlaceholderText("sk-ant-…  (paste your Anthropic API key)")
+        self._api_key_field.setEchoMode(QLineEdit.Password)
+        self._api_key_field.setMinimumWidth(340)
+        key_row.addWidget(self._api_key_field, 1)
+
+        self._key_show_btn = QPushButton("Show")
+        self._key_show_btn.setFixedWidth(52)
+        self._key_show_btn.setCheckable(True)
+        self._key_show_btn.toggled.connect(self._toggle_key_visibility)
+        key_row.addWidget(self._key_show_btn)
+
+        ai_layout.addLayout(key_row)
+
+        btn_row = QHBoxLayout()
+        save_key_btn = QPushButton("Save Key")
+        save_key_btn.setObjectName("primaryButton")
+        save_key_btn.clicked.connect(self._save_api_key)
+        btn_row.addWidget(save_key_btn)
+
+        test_key_btn = QPushButton("Test Key")
+        test_key_btn.clicked.connect(self._test_api_key)
+        btn_row.addWidget(test_key_btn)
+
+        clear_key_btn = QPushButton("Clear Key")
+        clear_key_btn.clicked.connect(self._clear_api_key)
+        btn_row.addWidget(clear_key_btn)
+
+        btn_row.addStretch()
+
+        self._api_key_status = QLabel("")
+        self._api_key_status.setStyleSheet("color: #a6adc8; font-size: 11px;")
+        btn_row.addWidget(self._api_key_status)
+
+        ai_layout.addLayout(btn_row)
+        layout.addWidget(ai_group)
 
         # ── Auto-Update ───────────────────────────────────────────────────
         update_group = QGroupBox("App Updates")
@@ -273,6 +327,14 @@ class SettingsView(QWidget):
                 self._set_dot(row["status_dot"], "ok")
                 row["status_label"].setText("Connected — ready to sync")
 
+        # Anthropic API key — show masked version if stored
+        from app.services.anthropic_key import get_key, masked
+        stored = get_key()
+        if stored:
+            self._api_key_field.setPlaceholderText(f"Stored: {masked(stored)}")
+            self._api_key_status.setText("✓ Key stored")
+            self._api_key_status.setStyleSheet("color: #a6e3a1; font-size: 11px;")
+
         sched = get_setting("backup_schedule", "Disabled")
         idx = self.backup_schedule.findText(sched)
         if idx >= 0:
@@ -284,6 +346,82 @@ class SettingsView(QWidget):
         token = os.path.join(os.path.expanduser("~"), ".baum-reseller", "gdrive_token.pkl")
         if os.path.exists(token):
             self.gdrive_status.setText("Google Drive: Connected")
+
+    # ── Anthropic API key ─────────────────────────────────────────────────
+
+    def _toggle_key_visibility(self, visible: bool):
+        self._api_key_field.setEchoMode(
+            QLineEdit.Normal if visible else QLineEdit.Password
+        )
+        self._key_show_btn.setText("Hide" if visible else "Show")
+
+    def _save_api_key(self):
+        key = self._api_key_field.text().strip()
+        if not key:
+            QMessageBox.warning(self, "API Key", "Please paste your Anthropic API key first.")
+            return
+        if not key.startswith("sk-ant-"):
+            reply = QMessageBox.question(
+                self, "Unusual Key Format",
+                "This doesn't look like an Anthropic key (expected 'sk-ant-…').\n"
+                "Save anyway?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+        from app.services.anthropic_key import set_key, masked
+        set_key(key)
+        self._api_key_field.clear()
+        self._api_key_field.setPlaceholderText(f"Stored: {masked(key)}")
+        self._api_key_status.setText("✓ Key saved")
+        self._api_key_status.setStyleSheet("color: #a6e3a1; font-size: 11px;")
+        QMessageBox.information(
+            self, "API Key Saved",
+            "Your Anthropic API key has been saved securely.\n\n"
+            "Go to Trending and click ⟳ Refresh to generate AI-powered insights."
+        )
+
+    def _test_api_key(self):
+        from app.services.anthropic_key import get_key
+        key = self._api_key_field.text().strip() or get_key()
+        if not key:
+            QMessageBox.warning(self, "No Key", "No API key to test — save one first.")
+            return
+
+        self._api_key_status.setText("Testing…")
+        self._api_key_status.setStyleSheet("color: #a6adc8; font-size: 11px;")
+
+        def _run():
+            from app.services.trending_service import test_claude_key
+            ok, msg = test_claude_key(key)
+            post_to_main(lambda: self._on_key_test_done(ok, msg))
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _on_key_test_done(self, ok: bool, msg: str):
+        if ok:
+            self._api_key_status.setText(f"✓ {msg}")
+            self._api_key_status.setStyleSheet("color: #a6e3a1; font-size: 11px;")
+        else:
+            self._api_key_status.setText("✗ Test failed")
+            self._api_key_status.setStyleSheet("color: #f38ba8; font-size: 11px;")
+            QMessageBox.warning(self, "API Key Test Failed", msg)
+
+    def _clear_api_key(self):
+        reply = QMessageBox.question(
+            self, "Clear API Key",
+            "Remove the stored Anthropic API key?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        from app.services.anthropic_key import clear_key
+        clear_key()
+        self._api_key_field.clear()
+        self._api_key_field.setPlaceholderText("sk-ant-…  (paste your Anthropic API key)")
+        self._api_key_status.setText("Key cleared")
+        self._api_key_status.setStyleSheet("color: #a6adc8; font-size: 11px;")
 
     # ── Platform helpers ──────────────────────────────────────────────────
 

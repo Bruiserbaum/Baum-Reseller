@@ -1,70 +1,19 @@
 """
-Trending service — scrapes eBay public sold-listings to surface top-selling
-brands and styles in Clothing & Shoes. No API key or login required.
+Trending service — fetches resale-market trend insights.
+
+Primary:  Claude AI (Anthropic API) — requires API key in Settings.
+Fallback: eBay public sold-listing scraper (no key needed, less reliable).
+
 Results are cached for 7 days; call fetch_trending(force=True) to bypass.
 """
 import json
 import os
 import re
 from collections import Counter
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 
-CACHE_FILE = os.path.join(os.path.expanduser("~"), ".baum-reseller", "trending_cache.json")
+CACHE_FILE    = os.path.join(os.path.expanduser("~"), ".baum-reseller", "trending_cache.json")
 CACHE_TTL_DAYS = 7
-
-# eBay category IDs — public sold listings, no login needed
-EBAY_CATEGORIES = [
-    {"id": "15724", "label": "Women's Clothing", "group": "clothing", "emoji": "👗"},
-    {"id": "1059",  "label": "Men's Clothing",   "group": "clothing", "emoji": "👔"},
-    {"id": "3034",  "label": "Women's Shoes",    "group": "shoes",    "emoji": "👠"},
-    {"id": "93427", "label": "Men's Shoes",      "group": "shoes",    "emoji": "👟"},
-]
-
-# Brands to detect — matched case-insensitively against listing titles
-CLOTHING_BRANDS = [
-    "Levi's", "Levis", "Wrangler", "Lee", "Lucky Brand", "AG Jeans",
-    "7 For All Mankind", "True Religion", "Citizens of Humanity", "Madewell",
-    "Gap", "Old Navy", "J.Crew", "Banana Republic", "Ralph Lauren", "Polo Ralph Lauren",
-    "Tommy Hilfiger", "Calvin Klein", "Free People", "Anthropologie",
-    "Urban Outfitters", "Zara", "H&M", "Lululemon", "Athleta",
-    "Under Armour", "Columbia", "Patagonia", "North Face", "The North Face",
-    "Carhartt", "Dickies", "Filson", "LL Bean", "L.L. Bean",
-    "Michael Kors", "Kate Spade", "Tory Burch", "Ann Taylor",
-    "White House Black Market", "Chico's", "Express", "Forever 21",
-]
-
-SHOE_BRANDS = [
-    "Nike", "Adidas", "New Balance", "Vans", "Converse", "Puma", "Reebok",
-    "UGG", "Timberland", "Dr. Martens", "Doc Martens", "Steve Madden",
-    "Sam Edelman", "Lucky Brand", "Clarks", "Birkenstock", "Skechers",
-    "ASICS", "Brooks", "Hoka", "On Running", "Allbirds", "Cole Haan",
-    "Ecco", "Rockport", "Hunter", "Sorel", "Merrell", "Keen", "Salomon",
-    "Coach", "Michael Kors", "Kate Spade", "Tory Burch", "Franco Sarto",
-    "Jessica Simpson", "Chinese Laundry", "Naturalizer",
-]
-
-ALL_BRANDS = list({b.lower(): b for b in CLOTHING_BRANDS + SHOE_BRANDS}.values())
-
-STYLE_KEYWORDS = {
-    "clothing": [
-        "jeans", "denim", "leggings", "joggers", "sweatpants", "hoodie",
-        "sweatshirt", "blouse", "dress", "skirt", "shorts", "blazer",
-        "jacket", "coat", "vest", "cardigan", "sweater", "flannel",
-        "activewear", "yoga pants", "crop top", "tank top", "t-shirt",
-    ],
-    "shoes": [
-        "sneakers", "running shoes", "boots", "ankle boots", "heels",
-        "pumps", "sandals", "slides", "loafers", "flats", "wedges",
-        "mules", "high tops", "slip-ons", "clogs", "platforms", "oxfords",
-    ],
-}
-
-_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/124.0.0.0 Safari/537.36"
-)
-
 
 # ── Cache helpers ─────────────────────────────────────────────────────────────
 
@@ -95,7 +44,6 @@ def _cache_is_fresh(cache: dict) -> bool:
 
 
 def get_cache_age_str(cache: dict) -> str:
-    """Human-readable age of the cached data, e.g. '2 days ago'."""
     ts = cache.get("fetched_at")
     if not ts:
         return "never"
@@ -112,13 +60,13 @@ def get_cache_age_str(cache: dict) -> str:
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def get_cached() -> dict:
-    """Return cached data without fetching (may be stale or empty)."""
+    """Return cached data without any network call."""
     return _load_cache()
 
 
 def fetch_trending(force: bool = False, progress_cb=None) -> dict:
     """
-    Fetch trending data. Uses cache unless force=True or cache is >7 days old.
+    Fetch trending data.  Uses cache unless force=True or cache is >7 days old.
     progress_cb(message: str) is called with status updates.
     Returns the full trending dict (also saved to cache).
     """
@@ -126,6 +74,190 @@ def fetch_trending(force: bool = False, progress_cb=None) -> dict:
     if not force and _cache_is_fresh(cache):
         return cache
 
+    from app.services.anthropic_key import has_key, get_key
+    if has_key():
+        if progress_cb:
+            progress_cb("Asking Claude AI for market insights…")
+        data = _fetch_with_claude(get_key(), progress_cb)
+    else:
+        if progress_cb:
+            progress_cb("No AI key configured — falling back to eBay scraper…")
+        data = _fetch_with_ebay(progress_cb)
+
+    _save_cache(data)
+    return data
+
+
+# ── Claude AI path ────────────────────────────────────────────────────────────
+
+_CLAUDE_MODEL = "claude-opus-4-5"
+
+_TRENDING_PROMPT = """\
+You are a reselling market intelligence expert specialising in secondhand marketplaces \
+(eBay, Mercari, Poshmark, Depop, Facebook Marketplace).
+
+Today's date: {today}
+
+Generate a current resale market trends report that a reseller can act on right now.
+
+Return ONLY a valid JSON object — no markdown, no code fences, no commentary, just raw JSON:
+
+{{
+  "categories": [
+    {{
+      "label": "Category Name",
+      "emoji": "single emoji",
+      "top_brands": [["Brand Name", score], ["Brand Name", score], ...],
+      "top_styles": [["Style keyword", score], ["Style keyword", score], ...],
+      "insight": "One concrete, actionable sentence for a reseller."
+    }}
+  ]
+}}
+
+Include exactly these 6 categories in this order:
+1. Women's Clothing  (emoji 👗)
+2. Men's Clothing    (emoji 👔)
+3. Women's Shoes     (emoji 👠)
+4. Men's Shoes       (emoji 👟)
+5. Streetwear & Sneakers (emoji 🔥)
+6. Accessories & Bags    (emoji 👜)
+
+Rules:
+- top_brands: exactly 5 entries, scores are integers 1–100 (100 = most in-demand in resale)
+- top_styles: exactly 5 entries, trending aesthetics/keywords, scores 1–100
+- insight: one sentence with a specific price range, demand signal, or sourcing tip
+- Base everything on {year} resale market knowledge — be specific and current\
+"""
+
+
+def _fetch_with_claude(api_key: str, progress_cb=None) -> dict:
+    try:
+        import anthropic
+    except ImportError:
+        raise RuntimeError(
+            "The 'anthropic' package is not installed.\n"
+            "Run: pip install anthropic"
+        )
+
+    today = date.today().strftime("%B %d, %Y")
+    prompt = _TRENDING_PROMPT.format(today=today, year=date.today().year)
+
+    client = anthropic.Anthropic(api_key=api_key)
+
+    if progress_cb:
+        progress_cb("Contacting Anthropic API…")
+
+    message = client.messages.create(
+        model=_CLAUDE_MODEL,
+        max_tokens=2048,
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    if progress_cb:
+        progress_cb("Parsing AI response…")
+
+    text = message.content[0].text.strip()
+
+    # Strip markdown code fences if the model wraps them anyway
+    text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.MULTILINE)
+    text = re.sub(r'\s*```$', '', text, flags=re.MULTILINE)
+    text = text.strip()
+
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Claude returned invalid JSON: {exc}\n\nRaw response:\n{text[:400]}")
+
+    categories = parsed.get("categories", [])
+    if not categories:
+        raise RuntimeError("Claude response contained no categories.")
+
+    # Normalise — ensure fields the UI expects always exist
+    for cat in categories:
+        cat.setdefault("group", "")
+        cat.setdefault("recent_sold", [])    # AI path: no live listings
+        cat.setdefault("insight", "")
+        cat.setdefault("top_brands", [])
+        cat.setdefault("top_styles", [])
+
+    return {
+        "fetched_at": datetime.now().isoformat(),
+        "source": "claude",
+        "model": _CLAUDE_MODEL,
+        "categories": categories,
+    }
+
+
+def test_claude_key(api_key: str) -> tuple[bool, str]:
+    """Make a minimal API call to verify the key works. Returns (ok, message)."""
+    try:
+        import anthropic
+    except ImportError:
+        return False, "Package 'anthropic' not installed — run: pip install anthropic"
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        msg = client.messages.create(
+            model=_CLAUDE_MODEL,
+            max_tokens=16,
+            messages=[{"role": "user", "content": "Say OK"}],
+        )
+        reply = msg.content[0].text.strip()
+        return True, f"Connected ✓  (model: {_CLAUDE_MODEL}, reply: "{reply}")"
+    except Exception as exc:
+        return False, str(exc)
+
+
+# ── eBay fallback path ────────────────────────────────────────────────────────
+
+EBAY_CATEGORIES = [
+    {"id": "15724", "label": "Women's Clothing", "group": "clothing", "emoji": "👗"},
+    {"id": "1059",  "label": "Men's Clothing",   "group": "clothing", "emoji": "👔"},
+    {"id": "3034",  "label": "Women's Shoes",    "group": "shoes",    "emoji": "👠"},
+    {"id": "93427", "label": "Men's Shoes",      "group": "shoes",    "emoji": "👟"},
+]
+
+CLOTHING_BRANDS = [
+    "Levi's", "Levis", "Wrangler", "Lee", "Lucky Brand", "Madewell",
+    "Gap", "J.Crew", "Banana Republic", "Ralph Lauren", "Polo Ralph Lauren",
+    "Tommy Hilfiger", "Calvin Klein", "Free People", "Lululemon", "Athleta",
+    "Under Armour", "Columbia", "Patagonia", "North Face", "The North Face",
+    "Carhartt", "Dickies", "Michael Kors", "Kate Spade", "Tory Burch",
+]
+
+SHOE_BRANDS = [
+    "Nike", "Adidas", "New Balance", "Vans", "Converse", "Puma", "Reebok",
+    "UGG", "Timberland", "Dr. Martens", "Steve Madden", "Sam Edelman",
+    "Clarks", "Birkenstock", "Skechers", "ASICS", "Brooks", "Hoka",
+    "On Running", "Cole Haan", "Coach", "Michael Kors", "Kate Spade",
+]
+
+ALL_BRANDS = list({b.lower(): b for b in CLOTHING_BRANDS + SHOE_BRANDS}.values())
+
+STYLE_KEYWORDS = {
+    "clothing": [
+        "jeans", "denim", "leggings", "joggers", "sweatpants", "hoodie",
+        "sweatshirt", "blouse", "dress", "skirt", "shorts", "blazer",
+        "jacket", "coat", "vest", "cardigan", "sweater", "crop top",
+    ],
+    "shoes": [
+        "sneakers", "running shoes", "boots", "ankle boots", "heels",
+        "pumps", "sandals", "slides", "loafers", "flats", "wedges",
+        "high tops", "slip-ons", "clogs", "platforms",
+    ],
+}
+
+_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
+
+_EBAY_SESSION = os.path.join(
+    os.path.expanduser("~"), ".baum-reseller", "ebay_session.json"
+)
+
+
+def _fetch_with_ebay(progress_cb=None) -> dict:
     results = []
     for i, cat in enumerate(EBAY_CATEGORIES):
         if progress_cb:
@@ -134,35 +266,25 @@ def fetch_trending(force: bool = False, progress_cb=None) -> dict:
             entry = _scrape_category(cat)
         except Exception as exc:
             entry = {
-                "label":      cat["label"],
-                "group":      cat["group"],
-                "emoji":      cat["emoji"],
-                "error":      str(exc),
-                "top_brands": [],
-                "top_styles": [],
-                "recent_sold": [],
+                "label": cat["label"], "group": cat["group"],
+                "emoji": cat["emoji"], "error": str(exc),
+                "top_brands": [], "top_styles": [], "recent_sold": [],
+                "insight": "",
             }
         results.append(entry)
 
-    data = {
+    return {
         "fetched_at": datetime.now().isoformat(),
+        "source": "ebay",
         "categories": results,
     }
-    _save_cache(data)
-    return data
-
-
-# ── Scraping ──────────────────────────────────────────────────────────────────
-
-def _ebay_url(cat_id: str) -> str:
-    return (
-        f"https://www.ebay.com/sch/i.html"
-        f"?_sacat={cat_id}&LH_Sold=1&LH_Complete=1&_sop=13&_ipg=48&rt=nc"
-    )
 
 
 def _scrape_category(cat: dict) -> dict:
-    url = _ebay_url(cat["id"])
+    url = (
+        f"https://www.ebay.com/sch/i.html"
+        f"?_sacat={cat['id']}&LH_Sold=1&LH_Complete=1&_sop=13&_ipg=48&rt=nc"
+    )
     listings = _fetch_listings(url)
 
     brand_counter: Counter = Counter()
@@ -185,19 +307,15 @@ def _scrape_category(cat: dict) -> dict:
         "top_brands":  brand_counter.most_common(5),
         "top_styles":  style_counter.most_common(5),
         "recent_sold": listings[:8],
+        "insight":     "",
     }
 
 
 def _fetch_listings(url: str) -> list[dict]:
-    """
-    Fetch eBay sold-listing search results.
-    Tries plain requests first; falls back to Playwright if blocked.
-    """
     try:
         return _fetch_with_requests(url)
     except Exception:
         pass
-    # Playwright fallback (bundled Chromium handles bot-detection better)
     try:
         return _fetch_with_playwright(url)
     except Exception as exc:
@@ -219,24 +337,10 @@ def _fetch_with_requests(url: str) -> list[dict]:
     return listings
 
 
-_EBAY_SESSION = os.path.join(
-    os.path.expanduser("~"), ".baum-reseller", "ebay_session.json"
-)
-
-
 def _fetch_with_playwright(url: str) -> list[dict]:
-    """
-    Load an eBay search page with Playwright and extract listing cards.
-
-    If the user has a saved eBay session (from the Sync tab) we reuse those
-    cookies — this makes eBay serve real results instead of a bot-check page.
-    Falls back to an anonymous context when no session is available.
-    """
     from playwright.sync_api import sync_playwright
     with sync_playwright() as p:
-        # ── Browser / context setup ───────────────────────────────────────
         if os.path.exists(_EBAY_SESSION):
-            # Reuse logged-in session → bypasses bot detection
             from app.utils.browser import headless_context
             browser, ctx = headless_context(p, _EBAY_SESSION)
         else:
@@ -246,20 +350,16 @@ def _fetch_with_playwright(url: str) -> list[dict]:
                       "--disable-blink-features=AutomationControlled"],
             )
             ctx = browser.new_context(
-                user_agent=_UA,
-                viewport={"width": 1280, "height": 800},
-                locale="en-US",
+                user_agent=_UA, viewport={"width": 1280, "height": 800}, locale="en-US",
             )
 
         page = ctx.new_page()
         page.goto(url, wait_until="load", timeout=25_000)
-        # Wait for the result grid to render (eBay lazy-loads search results)
         try:
             page.wait_for_selector(".s-item__title", timeout=8_000)
         except Exception:
-            pass  # proceed with whatever is in the DOM
+            pass
 
-        # ── Extract from live DOM — no HTML parsing needed ────────────────
         raw = page.evaluate("""
             () => Array.from(document.querySelectorAll('.s-item')).map(el => {
                 const titleEl = el.querySelector(
@@ -276,94 +376,47 @@ def _fetch_with_playwright(url: str) -> list[dict]:
                 i.url && i.title && i.title !== 'Shop on eBay' && i.title.length > 5
             )
         """)
-
-        # Capture HTML before closing — used as last-chance fallback
         html = page.content() if not raw else ""
         browser.close()
 
     if raw:
-        return [{"title": i["title"], "price": i["price"], "url": i["url"]}
-                for i in raw]
-    # Last resort: regex-parse the captured HTML
+        return [{"title": i["title"], "price": i["price"], "url": i["url"]} for i in raw]
     return _parse_ebay_html(html)
 
 
 def _parse_ebay_html(html: str) -> list[dict]:
-    """
-    Parse eBay search-results HTML into a list of {title, price, url} dicts.
-
-    eBay's title markup has changed over time.  We try four patterns in order:
-      1. Modern:  <h3 class="s-item__title"><span role="heading">TITLE</span></h3>
-      2. Any:     <span role="heading">TITLE</span>  (≥6 chars)
-      3. Legacy:  <span class="BOLD">TITLE</span>
-      4. Fallback: strip tags from <h3 class="s-item__title">…</h3>
-    """
     listings = []
-    seen_titles: set[str] = set()
-
-    # Split into per-item chunks on <li class="s-item…"> boundaries
+    seen: set[str] = set()
     chunks = re.split(r'(?=<li[^>]*\bs-item\b[^>]*>)', html)
-
     for chunk in chunks:
-        # Skip the promotional "Shop on eBay" ghost item
         if "Shop on eBay" in chunk:
             continue
-
-        # ── Listing URL ───────────────────────────────────────────────────
-        url_m = re.search(
-            r'<a[^>]+class="[^"]*s-item__link[^"]*"[^>]*href="([^"]+)"', chunk
-        )
+        url_m = re.search(r'<a[^>]+class="[^"]*s-item__link[^"]*"[^>]*href="([^"]+)"', chunk)
         if not url_m:
             continue
         item_url = url_m.group(1).split("?")[0]
 
-        # ── Title — four fallback patterns ────────────────────────────────
         title: str | None = None
-
-        # 1. Modern eBay: <h3 class="s-item__title"><span role="heading">TITLE</span>
-        m = re.search(
+        for pattern in [
             r'<h3[^>]+s-item__title[^>]*>.*?<span[^>]*role=["\']heading["\'][^>]*>([^<]+)</span>',
-            chunk, re.DOTALL | re.IGNORECASE,
-        )
-        if m:
-            title = m.group(1).strip()
-
-        # 2. Any <span role="heading"> with enough text (catches other layouts)
-        if not title:
-            m = re.search(
-                r'<span[^>]+role=["\']heading["\'][^>]*>([^<]{6,})</span>',
-                chunk, re.IGNORECASE,
-            )
+            r'<span[^>]+role=["\']heading["\'][^>]*>([^<]{6,})</span>',
+            r'<span[^>]+class="[^"]*BOLD[^"]*"[^>]*>([^<]+)</span>',
+        ]:
+            m = re.search(pattern, chunk, re.DOTALL | re.IGNORECASE)
             if m:
                 title = m.group(1).strip()
-
-        # 3. Legacy eBay: <span class="BOLD">TITLE</span>
+                break
         if not title:
-            m = re.search(
-                r'<span[^>]+class="[^"]*BOLD[^"]*"[^>]*>([^<]+)</span>', chunk
-            )
-            if m:
-                title = m.group(1).strip()
-
-        # 4. Last resort: strip all tags from the h3 block
-        if not title:
-            m = re.search(
-                r'<h3[^>]+s-item__title[^>]*>(.*?)</h3>', chunk, re.DOTALL
-            )
+            m = re.search(r'<h3[^>]+s-item__title[^>]*>(.*?)</h3>', chunk, re.DOTALL)
             if m:
                 title = re.sub(r'<[^>]+>', '', m.group(1)).strip()
 
-        if not title or len(title) < 6:
+        if not title or len(title) < 6 or title in seen:
             continue
         title = re.sub(r'\s+', ' ', title)
-        if title in seen_titles:
-            continue
-        seen_titles.add(title)
-
-        # ── Price ─────────────────────────────────────────────────────────
+        seen.add(title)
         price_m = re.search(r'\$([\d,]+\.?\d*)', chunk)
         price = f"${price_m.group(1)}" if price_m else ""
-
         listings.append({"title": title, "price": price, "url": item_url})
 
     return listings

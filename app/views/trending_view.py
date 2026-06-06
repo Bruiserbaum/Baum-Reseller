@@ -57,14 +57,14 @@ class TrendingView(QWidget):
         header.addWidget(self._refresh_btn)
         self._root_layout.addLayout(header)
 
-        # Source note
-        note = QLabel(
-            "Showing top-selling brands and styles from eBay sold listings in "
-            "Clothing & Shoes — updated weekly. Click any item to open it on eBay."
+        # Source note (updated dynamically after fetch)
+        self._source_note = QLabel(
+            "Trend insights powered by Claude AI — updated weekly. "
+            "Add your Anthropic API key in Settings to enable AI insights."
         )
-        note.setWordWrap(True)
-        note.setStyleSheet("color: #a6adc8; font-size: 11px;")
-        self._root_layout.addWidget(note)
+        self._source_note.setWordWrap(True)
+        self._source_note.setStyleSheet("color: #a6adc8; font-size: 11px;")
+        self._root_layout.addWidget(self._source_note)
 
         # Progress bar (hidden during normal display)
         self._progress = QProgressBar()
@@ -102,10 +102,25 @@ class TrendingView(QWidget):
     def _force_refresh(self):
         if self._fetching:
             return
+
+        # Warn if no API key is configured
+        from app.services.anthropic_key import has_key
+        if not has_key():
+            from PySide6.QtWidgets import QMessageBox
+            reply = QMessageBox.question(
+                self, "No Anthropic API Key",
+                "AI-powered trending insights require an Anthropic API key.\n\n"
+                "Go to Settings → Trending & AI Insights to add your key.\n\n"
+                "Continue anyway using the eBay scraper (slower, less reliable)?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+
         self._fetching = True
         self._refresh_btn.setEnabled(False)
         self._progress.show()
-        self._status_lbl.setText("Connecting to eBay…")
+        self._status_lbl.setText("Fetching trending data…")
 
         def _run():
             from app.services.trending_service import fetch_trending, get_cache_age_str
@@ -130,6 +145,19 @@ class TrendingView(QWidget):
         from app.services.trending_service import get_cache_age_str
         self._age_lbl.setText(f"Updated {get_cache_age_str(data)}")
         self._status_lbl.setText("")
+
+        source = data.get("source", "ebay")
+        model  = data.get("model", "")
+        if source == "claude":
+            self._source_note.setText(
+                f"✨  AI-powered insights from {model} — updated weekly. "
+                "Refresh anytime to get the latest market read."
+            )
+        else:
+            self._source_note.setText(
+                "Showing top-selling brands and styles from eBay sold listings — "
+                "updated weekly. Add an Anthropic API key in Settings for AI insights."
+            )
         self._render(data)
 
     def _on_fetch_error(self, error: str):
@@ -227,22 +255,38 @@ class TrendingView(QWidget):
         else:
             layout.addWidget(QLabel("  No style data"))
 
-        # ── Recently sold ─────────────────────────────────────────────────
+        # ── Bottom section: AI insight OR eBay recent sold ───────────────
         sep2 = QFrame()
         sep2.setFrameShape(QFrame.HLine)
         sep2.setStyleSheet("color: #313244;")
         layout.addWidget(sep2)
 
-        sold_lbl = QLabel("🛒  Recently Sold on eBay")
-        sold_lbl.setStyleSheet("color: #a6e3a1; font-size: 12px; font-weight: bold;")
-        layout.addWidget(sold_lbl)
+        insight  = cat.get("insight", "")
+        recent   = cat.get("recent_sold", [])
 
-        recent = cat.get("recent_sold", [])
-        if recent:
+        if insight:
+            # AI-generated insight
+            insight_lbl = QLabel("💡  Market Insight")
+            insight_lbl.setStyleSheet("color: #fab387; font-size: 12px; font-weight: bold;")
+            layout.addWidget(insight_lbl)
+
+            text_lbl = QLabel(insight)
+            text_lbl.setWordWrap(True)
+            text_lbl.setStyleSheet("color: #cdd6f4; font-size: 12px; padding: 4px 0;")
+            layout.addWidget(text_lbl)
+        elif recent:
+            sold_lbl = QLabel("🛒  Recently Sold on eBay")
+            sold_lbl.setStyleSheet("color: #a6e3a1; font-size: 12px; font-weight: bold;")
+            layout.addWidget(sold_lbl)
             for item in recent:
                 layout.addWidget(self._listing_link(item))
         else:
-            layout.addWidget(QLabel("  No recent listings found"))
+            sold_lbl = QLabel("🛒  Recently Sold on eBay")
+            sold_lbl.setStyleSheet("color: #a6e3a1; font-size: 12px; font-weight: bold;")
+            layout.addWidget(sold_lbl)
+            no_data = QLabel("  No data — add an Anthropic API key in Settings for AI insights.")
+            no_data.setStyleSheet("color: #585b70; font-size: 11px;")
+            layout.addWidget(no_data)
 
         return frame
 
