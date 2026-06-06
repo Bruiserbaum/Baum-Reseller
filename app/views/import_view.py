@@ -6,12 +6,15 @@ from PySide6.QtWidgets import (
     QProgressBar, QTableWidget, QTableWidgetItem, QHeaderView,
     QScrollArea, QFileDialog, QMessageBox, QFrame
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 
 from app.utils.qt_thread import post_to_main
 
 
 class ImportView(QWidget):
+    # Emitted after a successful import — connects to inventory.mark_dirty()
+    import_completed = Signal()
+
     def __init__(self):
         super().__init__()
         self._csv_rows: list[dict] = []
@@ -260,3 +263,6 @@ class ImportView(QWidget):
         else:
             QMessageBox.information(self, "Import Complete",
                                     f"Successfully imported {imported} record(s).")
+
+        if imported:
+            self.import_completed.emit()   # tell inventory to refresh on next visit

@@ -75,6 +75,10 @@ class MainWindow(QMainWindow):
         # Propagate badge changes from notifications view
         self.notifications_view.badge_changed.connect(self._update_alert_badge)
 
+        # After any sync or import, mark the inventory dirty so it reloads on next visit
+        self.sync_view.sync_completed.connect(self.inventory_view.mark_dirty)
+        self.import_view.import_completed.connect(self.inventory_view.mark_dirty)
+
         # Periodic status refresh
         status_timer = QTimer(self)
         status_timer.timeout.connect(self._refresh_status)
@@ -138,7 +142,7 @@ class MainWindow(QMainWindow):
         for n, btn in self._nav_btns.items():
             btn.setChecked(n == name)
         if name == "inventory":
-            self.inventory_view.refresh()
+            self.inventory_view.lazy_refresh()
         elif name == "sync":
             self.sync_view.refresh()
         elif name == "alerts":

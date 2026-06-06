@@ -1,10 +1,14 @@
+import threading
+
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
     QPushButton, QLabel, QLineEdit, QHeaderView, QAbstractItemView, QComboBox
 )
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
 
 from app.database.models import get_all_items
+from app.utils.qt_thread import post_to_main
 from app.views.item_detail_view import ItemDetailDialog
 
 
@@ -12,6 +16,8 @@ class InventoryView(QWidget):
     def __init__(self):
         super().__init__()
         self._all_items: list[dict] = []
+        self._dirty = False   # False here because refresh() is called immediately below
+        self._loading = False
         self._build_ui()
         self.refresh()
 
@@ -77,7 +83,34 @@ class InventoryView(QWidget):
     # ── Data ──────────────────────────────────────────────────────────────
 
     def refresh(self):
-        self._all_items = get_all_items()
+        """Fetch all items on a background thread, then render on the main thread.
+        Calling while a fetch is already in-flight is a no-op.
+        """
+        if self._loading:
+            return
+        self._loading = True
+        self._dirty = False
+
+        def _fetch():
+            items = get_all_items()
+            post_to_main(lambda: self._on_data_loaded(items))
+
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    def lazy_refresh(self):
+        """Refresh only when data has been marked dirty since the last load.
+        Call this on tab-switch so we don't re-query on every navigation.
+        """
+        if self._dirty:
+            self.refresh()
+
+    def mark_dirty(self):
+        """Mark the data as stale (e.g. after a sync or import completes)."""
+        self._dirty = True
+
+    def _on_data_loaded(self, items: list[dict]):
+        self._loading = False
+        self._all_items = items
         self._refresh_category_filter()
         self._apply_filter()
 
@@ -109,7 +142,13 @@ class InventoryView(QWidget):
         self._render(rows)
 
     def _render(self, items: list[dict]):
+        # Disable repaints and sorting while filling to avoid O(n²) Qt overhead.
+        self.table.setSortingEnabled(False)
+        self.table.setUpdatesEnabled(False)
         self.table.setRowCount(len(items))
+
+        _missing_color = QColor("#f38ba8")
+
         for row, item in enumerate(items):
             platforms_raw = item.get("platforms") or ""
             platform_str = " | ".join(p.capitalize() for p in platforms_raw.split(",") if p)
@@ -131,13 +170,16 @@ class InventoryView(QWidget):
                 price_str,
                 status,
             ]
+            item_id = item.get("id")
             for col, text in enumerate(cells):
                 cell = QTableWidgetItem(str(text))
-                cell.setData(Qt.UserRole, item.get("id"))
+                cell.setData(Qt.UserRole, item_id)
                 if is_missing:
-                    cell.setForeground(__import__("PySide6.QtGui", fromlist=["QColor"]).QColor("#f38ba8"))
+                    cell.setForeground(_missing_color)
                 self.table.setItem(row, col, cell)
 
+        self.table.setUpdatesEnabled(True)
+        self.table.setSortingEnabled(True)
         self.count_label.setText(f"{len(items)} item{'s' if len(items) != 1 else ''}")
 
     # ── Actions ───────────────────────────────────────────────────────────

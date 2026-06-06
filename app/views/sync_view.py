@@ -4,7 +4,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QProgressBar, QFrame, QScrollArea, QMessageBox
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 
 from app.database.models import get_setting
 from app.utils.qt_thread import post_to_main
@@ -14,6 +14,9 @@ PLATFORMS = ["ebay", "mercari", "poshmark"]
 
 
 class SyncView(QWidget):
+    # Emitted whenever any platform sync succeeds — connects to inventory.mark_dirty()
+    sync_completed = Signal()
+
     def __init__(self):
         super().__init__()
         self._rows: dict[str, dict] = {}
@@ -196,6 +199,7 @@ class SyncView(QWidget):
             row = self._rows[platform]
             row["last_lbl"].setText(f"Last synced: {last}" if last else "")
             self._status_lbl.setText(f"Synced {count} listing(s) from {PLATFORM_DISPLAY[platform]}.")
+            self.sync_completed.emit()   # tell inventory to refresh on next visit
         else:
             self._status_lbl.setText(f"Sync error: {err}")
             QMessageBox.warning(self, "Sync Error", f"Sync failed:\n\n{err}")
@@ -203,6 +207,7 @@ class SyncView(QWidget):
     def _on_all_done(self, total: int, errors: list):
         self._set_busy(False)
         self.refresh()
+        self.sync_completed.emit()       # tell inventory to refresh on next visit
         if errors:
             self._status_lbl.setText(f"Sync complete: {total} listing(s). {len(errors)} error(s).")
             QMessageBox.warning(self, "Sync Complete with Errors",
