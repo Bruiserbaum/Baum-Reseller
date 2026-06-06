@@ -117,7 +117,11 @@ class EbayService:
             if progress_cb:
                 progress_cb("Checking eBay session…")
 
-            page.goto(ACTIVE_URL, wait_until="networkidle", timeout=30_000)
+            # eBay Seller Hub runs background analytics pings indefinitely, so
+            # "networkidle" never fires.  "load" waits for the page + its static
+            # assets, then we give the SPA an extra 3 s to fire its XHR calls.
+            page.goto(ACTIVE_URL, wait_until="load", timeout=30_000)
+            page.wait_for_timeout(3_000)   # let Vue/XHR initialise
 
             if any(a in page.url for a in _AUTH):
                 browser.close()
@@ -131,7 +135,8 @@ class EbayService:
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 page.wait_for_timeout(1_000)
 
-            page.goto(SOLD_URL, wait_until="networkidle", timeout=30_000)
+            page.goto(SOLD_URL, wait_until="load", timeout=30_000)
+            page.wait_for_timeout(3_000)   # let Vue/XHR initialise
             for _ in range(3):
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 page.wait_for_timeout(1_000)
