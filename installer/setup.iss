@@ -1,5 +1,5 @@
 #define MyAppName      "Baum Reseller"
-#define MyAppVersion   "1.3.4"
+#define MyAppVersion   "1.3.5"
 #define MyAppPublisher "Bruiserbaum"
 #define MyAppURL       "https://github.com/Bruiserbaum/Baum-Reseller"
 #define MyAppExeName   "BaumReseller.exe"
@@ -25,6 +25,7 @@ SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
+CloseApplications=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayName={#MyAppName}
