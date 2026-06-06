@@ -1,28 +1,104 @@
+import os
 import threading
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+from datetime import date
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
     QPushButton, QLabel, QLineEdit, QHeaderView, QAbstractItemView,
-    QComboBox, QProgressBar, QStackedWidget, QFrame
+    QComboBox, QProgressBar, QStackedWidget, QStyledItemDelegate,
 )
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QColor
+from PySide6.QtCore import Qt, QTimer, QSize
+from PySide6.QtGui import QColor, QPixmap, QImage
 
 from app.database.models import get_all_items
 from app.utils.qt_thread import post_to_main
 from app.views.item_detail_view import ItemDetailDialog
 
-# Starting widths for columns 1-6 (Platforms … Status).
-# Column 0 (Title) uses Stretch mode and fills whatever space remains.
-_COL_WIDTHS = [110, 60, 140, 70, 90, 80]
+# ── Column layout ─────────────────────────────────────────────────────────────
+_THUMB_COL = 0    # thumbnail (Fixed, non-resizable)
+_TITLE_COL = 1    # title     (Interactive, auto-fills remaining space)
+_THUMB_W   = 60   # thumbnail column width in px
+_ROW_H     = 58   # row height in px
 
+# Starting widths for columns 2-8
+#  2:Platforms  3:Bin  4:Category  5:Cost  6:Listed  7:Days  8:Status
+_COL_WIDTHS = [110, 60, 140, 70, 90, 60, 80]
+
+# Thread pool caps concurrent image downloads at 8; daemon threads won't block exit
+_IMG_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="img-loader")
+
+
+# ── Date helpers ──────────────────────────────────────────────────────────────
+
+def _format_date(date_str) -> str:
+    """Return a short date like '6/5/26', or '—' if missing/invalid."""
+    if not date_str:
+        return "—"
+    try:
+        d = date.fromisoformat(str(date_str)[:10])
+        return f"{d.month}/{d.day}/{d.year % 100:02d}"
+    except Exception:
+        return str(date_str) if date_str else "—"
+
+
+def _days_listed_str(first_date) -> str:
+    """Return compact duration like '5d', '3w', '2mo', '1y', or '—'."""
+    if not first_date:
+        return "—"
+    try:
+        d = date.fromisoformat(str(first_date)[:10])
+        n = (date.today() - d).days
+        if n < 0:
+            return "—"
+        if n == 0:
+            return "Today"
+        if n < 7:
+            return f"{n}d"
+        if n < 30:
+            return f"{n // 7}w"
+        if n < 365:
+            return f"{round(n / 30.4)}mo"
+        return f"{round(n / 365.25)}y"
+    except Exception:
+        return "—"
+
+
+# ── Thumbnail delegate ────────────────────────────────────────────────────────
+
+class ThumbnailDelegate(QStyledItemDelegate):
+    """
+    Paints a QPixmap stored in Qt.DecorationRole, scaled to fill the cell
+    while preserving aspect ratio.  Falls back to a dark placeholder rect.
+    """
+
+    def paint(self, painter, option, index):
+        r  = option.rect.adjusted(3, 3, -3, -3)
+        pm = index.data(Qt.DecorationRole)
+        if isinstance(pm, QPixmap) and not pm.isNull():
+            scaled = pm.scaled(r.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            x = r.x() + (r.width()  - scaled.width())  // 2
+            y = r.y() + (r.height() - scaled.height()) // 2
+            painter.drawPixmap(x, y, scaled)
+        else:
+            # Dark placeholder — QColor instantiated at paint time (after QApp exists)
+            painter.fillRect(r, QColor("#313244"))
+
+    def sizeHint(self, option, index):
+        return QSize(_THUMB_W, _ROW_H)
+
+
+# ── Inventory view ────────────────────────────────────────────────────────────
 
 class InventoryView(QWidget):
     def __init__(self):
         super().__init__()
         self._all_items: list[dict] = []
-        self._dirty = False
+        self._dirty   = False
         self._loading = False
+        # item_id → QPixmap | None (None = in-flight or failed)
+        self._pixmap_cache: dict[int, QPixmap | None] = {}
         self._build_ui()
         self.refresh()
 
@@ -105,13 +181,13 @@ class InventoryView(QWidget):
         lp_layout.addWidget(self._load_sub)
 
         self._load_bar = QProgressBar()
-        self._load_bar.setRange(0, 0)        # indeterminate spinner
+        self._load_bar.setRange(0, 0)
         self._load_bar.setTextVisible(False)
         self._load_bar.setFixedWidth(320)
         self._load_bar.setFixedHeight(6)
         lp_layout.addWidget(self._load_bar, 0, Qt.AlignCenter)
 
-        self._stack.addWidget(loading_page)  # index 0
+        self._stack.addWidget(loading_page)   # index 0
 
         # Page 1 — Table
         table_page = QWidget()
@@ -120,18 +196,35 @@ class InventoryView(QWidget):
         tp_layout.setSpacing(0)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(7)
-        self.table.setHorizontalHeaderLabels(
-            ["Title", "Platforms", "Bin", "Category", "Cost", "Listed At", "Status"]
-        )
+        self.table.setColumnCount(9)
+        self.table.setHorizontalHeaderLabels([
+            "",           # 0: Thumbnail
+            "Title",      # 1: auto-stretch
+            "Platforms",  # 2
+            "Bin",        # 3
+            "Category",   # 4
+            "Cost",       # 5
+            "Listed",     # 6
+            "Days",       # 7
+            "Status",     # 8
+        ])
+
         hdr = self.table.horizontalHeader()
-        hdr.setSectionResizeMode(QHeaderView.Interactive)   # ALL columns stay draggable
+        hdr.setSectionResizeMode(QHeaderView.Interactive)           # all draggable…
+        hdr.setSectionResizeMode(_THUMB_COL, QHeaderView.Fixed)    # …except thumbnail
         hdr.setStretchLastSection(False)
-        hdr.setMinimumSectionSize(50)
-        for col, w in enumerate(_COL_WIDTHS, start=1):     # cols 1-6 get fixed starts
+        hdr.setMinimumSectionSize(40)
+
+        self.table.setColumnWidth(_THUMB_COL, _THUMB_W)
+        for col, w in enumerate(_COL_WIDTHS, start=2):
             self.table.setColumnWidth(col, w)
-        # When the user drags any non-title column, the title absorbs the slack
+
         hdr.sectionResized.connect(self._on_col_resized)
+
+        # Row height & thumbnail painter
+        self.table.verticalHeader().setDefaultSectionSize(_ROW_H)
+        self._thumb_delegate = ThumbnailDelegate(self.table)
+        self.table.setItemDelegateForColumn(_THUMB_COL, self._thumb_delegate)
 
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -146,21 +239,22 @@ class InventoryView(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        # Defer one tick so the table viewport has updated its dimensions first
         QTimer.singleShot(0, self._fit_title_col)
 
     def _on_col_resized(self, col: int, _old: int, _new: int):
         """When any non-title column is dragged, title absorbs the slack."""
-        if col != 0:
+        if col != _TITLE_COL:
             self._fit_title_col()
 
     def _fit_title_col(self):
-        """Set title column to fill all remaining horizontal space."""
+        """Set title column (col 1) to fill all remaining horizontal space."""
         vp_width = self.table.viewport().width()
         other_width = sum(
-            self.table.columnWidth(c) for c in range(1, self.table.columnCount())
+            self.table.columnWidth(c)
+            for c in range(self.table.columnCount())
+            if c != _TITLE_COL
         )
-        self.table.setColumnWidth(0, max(100, vp_width - other_width))
+        self.table.setColumnWidth(_TITLE_COL, max(100, vp_width - other_width))
 
     # ── Data ──────────────────────────────────────────────────────────────
 
@@ -171,7 +265,6 @@ class InventoryView(QWidget):
         self._loading = True
         self._dirty = False
 
-        # Show loading page immediately — user sees feedback right away
         self._load_title.setText("Loading Inventory")
         self._load_sub.setText("Fetching items from the database…")
         self._load_bar.setRange(0, 0)
@@ -193,16 +286,11 @@ class InventoryView(QWidget):
         self._dirty = True
 
     def _on_data_loaded(self, items: list[dict]):
-        count = len(items)
-        self._load_sub.setText(f"Rendering {count:,} items…")
-        self._load_bar.setRange(0, 0)
-
+        self._load_sub.setText(f"Rendering {len(items):,} items…")
         self._loading = False
         self._all_items = items
         self._refresh_category_filter()
-        self._apply_filter()   # → _render() — fast thanks to setUpdatesEnabled(False)
-
-        # Switch to table page once render is complete
+        self._apply_filter()
         self._stack.setCurrentIndex(1)
 
     def _refresh_category_filter(self):
@@ -231,14 +319,11 @@ class InventoryView(QWidget):
         if category != "All":
             rows = [i for i in rows if i.get("category", "") == category]
         if hide_unlisted:
-            # Hide only items with no listings at all — keep active AND sold items
             rows = [i for i in rows
                     if (i.get("listing_count") or 0) + (i.get("sold_count") or 0) > 0]
-
         self._render(rows)
 
     def _render(self, items: list[dict]):
-        # Disable repaints + sorting while filling to avoid O(n²) Qt overhead
         self.table.setSortingEnabled(False)
         self.table.setUpdatesEnabled(False)
         self.table.setRowCount(len(items))
@@ -246,11 +331,25 @@ class InventoryView(QWidget):
         _missing_color = QColor("#f38ba8")
 
         for row, item in enumerate(items):
+            item_id = item.get("id")
+
+            # ── Col 0: Thumbnail ─────────────────────────────────────────
+            thumb = QTableWidgetItem()
+            thumb.setData(Qt.UserRole, item_id)
+            thumb.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            cached_pm = self._pixmap_cache.get(item_id)
+            if cached_pm:
+                thumb.setData(Qt.DecorationRole, cached_pm)
+            self.table.setItem(row, _THUMB_COL, thumb)
+
+            # Kick off background image load if not yet in cache
+            img_path = item.get("first_image_path") or ""
+            if img_path and item_id not in self._pixmap_cache:
+                self._load_image_async(item_id, img_path)
+
+            # ── Cols 1-8: Text cells ─────────────────────────────────────
             platforms_raw = item.get("platforms") or ""
             platform_str  = " | ".join(p.capitalize() for p in platforms_raw.split(",") if p)
-
-            listed_price = item.get("listed_price")
-            price_str    = f"${listed_price:.2f}" if listed_price else "—"
 
             active_count = item.get("listing_count", 0) or 0
             sold_count   = item.get("sold_count", 0) or 0
@@ -260,20 +359,22 @@ class InventoryView(QWidget):
                 status = f"Sold ({sold_count})"
             else:
                 status = "Unlisted"
-            is_missing = bool(item.get("is_missing", 0))
-            title_text = ("❓ " if is_missing else "") + item.get("title", "")
 
-            cells = [
-                title_text,
-                platform_str,
-                item.get("bin_location", ""),
-                item.get("category", ""),
-                f"${(item.get('purchase_cost') or 0):.2f}",
-                price_str,
-                status,
+            is_missing   = bool(item.get("is_missing", 0))
+            title_text   = ("❓ " if is_missing else "") + item.get("title", "")
+            first_listed = item.get("first_listed_date")
+
+            text_cells = [
+                (_TITLE_COL, title_text),
+                (2, platform_str),
+                (3, item.get("bin_location") or ""),
+                (4, item.get("category") or ""),
+                (5, f"${(item.get('purchase_cost') or 0):.2f}"),
+                (6, _format_date(first_listed)),
+                (7, _days_listed_str(first_listed)),
+                (8, status),
             ]
-            item_id = item.get("id")
-            for col, text in enumerate(cells):
+            for col, text in text_cells:
                 cell = QTableWidgetItem(str(text))
                 cell.setData(Qt.UserRole, item_id)
                 if is_missing:
@@ -283,6 +384,57 @@ class InventoryView(QWidget):
         self.table.setUpdatesEnabled(True)
         self.table.setSortingEnabled(True)
         self.count_label.setText(f"{len(items)} item{'s' if len(items) != 1 else ''}")
+        QTimer.singleShot(0, self._fit_title_col)
+
+    # ── Image loading ─────────────────────────────────────────────────────
+
+    def _load_image_async(self, item_id: int, path: str):
+        """
+        Submit an image load to the shared thread pool.  QImage is created in the
+        worker (thread-safe); QPixmap conversion + cell update happen in the main
+        thread via post_to_main.  pool caps concurrency at 8 workers.
+        """
+        self._pixmap_cache[item_id] = None   # mark as in-flight
+
+        def _work():
+            img: QImage | None = None
+            try:
+                if path.startswith("http"):
+                    req = urllib.request.Request(
+                        path,
+                        headers={"User-Agent": (
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/124.0.0.0 Safari/537.36"
+                        )},
+                    )
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        data = resp.read()
+                    img = QImage()
+                    if not img.loadFromData(data):
+                        img = None
+                elif os.path.exists(path):
+                    img = QImage(path)
+                    if img.isNull():
+                        img = None
+            except Exception:
+                img = None
+
+            def _apply():
+                pm = QPixmap.fromImage(img) if (img and not img.isNull()) else None
+                self._pixmap_cache[item_id] = pm
+                if pm is None:
+                    return
+                # Locate the row that still holds this item and update its pixmap
+                for r in range(self.table.rowCount()):
+                    cell = self.table.item(r, _THUMB_COL)
+                    if cell and cell.data(Qt.UserRole) == item_id:
+                        cell.setData(Qt.DecorationRole, pm)
+                        break
+
+            post_to_main(_apply)
+
+        _IMG_POOL.submit(_work)
 
     # ── Actions ───────────────────────────────────────────────────────────
 
@@ -292,7 +444,8 @@ class InventoryView(QWidget):
             self.refresh()
 
     def _open_item(self, index):
-        cell = self.table.item(index.row(), 0)
+        # item_id is stored in UserRole on every cell in the row
+        cell = self.table.item(index.row(), _TITLE_COL)
         if cell:
             item_id = cell.data(Qt.UserRole)
             if item_id:

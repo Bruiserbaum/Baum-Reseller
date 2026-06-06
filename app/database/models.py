@@ -20,7 +20,15 @@ def get_all_items() -> list[dict]:
                    COUNT(DISTINCT CASE WHEN l.status = 'active' THEN l.id END) AS listing_count,
                    -- sold_count: sold listings (so we can display "Sold" instead of "Unlisted")
                    COUNT(DISTINCT CASE WHEN l.status = 'sold'   THEN l.id END) AS sold_count,
-                   MAX(CASE WHEN l.status = 'active' THEN l.listing_price END) AS listed_price
+                   MAX(CASE WHEN l.status = 'active' THEN l.listing_price END) AS listed_price,
+                   -- earliest listing date across all platforms
+                   MIN(l.listed_date) AS first_listed_date,
+                   -- best available image: local file first, then remote URL
+                   (SELECT COALESCE(NULLIF(img.local_path, ''), NULLIF(img.source_url, ''))
+                    FROM images img
+                    WHERE img.item_id = i.id
+                    ORDER BY img.is_primary DESC, img.id ASC
+                    LIMIT 1) AS first_image_path
             FROM items i
             LEFT JOIN listings l ON l.item_id = i.id
             GROUP BY i.id
