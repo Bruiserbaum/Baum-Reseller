@@ -1,8 +1,11 @@
+import json
+import os
 import threading
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QProgressBar, QFrame, QScrollArea, QMessageBox
+    QPushButton, QProgressBar, QFrame, QScrollArea, QMessageBox,
+    QDialog, QTextEdit, QDialogButtonBox, QApplication,
 )
 from PySide6.QtCore import Qt, Signal
 
@@ -60,6 +63,11 @@ class SyncView(QWidget):
         self._sync_all_btn.setObjectName("primaryButton")
         self._sync_all_btn.clicked.connect(self._force_sync_all)
         header.addWidget(self._sync_all_btn)
+
+        logs_btn = QPushButton("📋 Sync Logs")
+        logs_btn.setToolTip("View detailed debug output from the last eBay / Mercari sync")
+        logs_btn.clicked.connect(self._show_sync_logs)
+        header.addWidget(logs_btn)
         layout.addLayout(header)
 
         # Progress + status
@@ -198,11 +206,98 @@ class SyncView(QWidget):
             last = gs(f"last_sync_{platform}", "")
             row = self._rows[platform]
             row["last_lbl"].setText(f"Last synced: {last}" if last else "")
-            self._status_lbl.setText(f"Synced {count} listing(s) from {PLATFORM_DISPLAY[platform]}.")
+
+            # Inline debug summary — tells us at a glance whether the scraper found anything
+            detail = self._debug_summary(platform)
+            self._status_lbl.setText(
+                f"Synced {count} listing(s) from {PLATFORM_DISPLAY[platform]}.{detail}"
+            )
             self.sync_completed.emit()   # tell inventory to refresh on next visit
         else:
             self._status_lbl.setText(f"Sync error: {err}")
             QMessageBox.warning(self, "Sync Error", f"Sync failed:\n\n{err}")
+
+    @staticmethod
+    def _debug_summary(platform: str) -> str:
+        """Return a short inline summary from the platform's debug log file."""
+        path = os.path.join(
+            os.path.expanduser("~"), ".baum-reseller", f"debug_{platform}_sync.json"
+        )
+        try:
+            with open(path, encoding="utf-8") as f:
+                d = json.load(f)
+            xhr  = d.get("xhr_responses_captured", "?")
+            xitm = d.get("xhr_items_parsed", "?")
+            dom  = d.get("dom_active_items", 0) + d.get("dom_sold_items", 0)
+            return f"  [XHR: {xhr} responses → {xitm} items | DOM: {dom} items]"
+        except Exception:
+            return ""
+
+    def _show_sync_logs(self):
+        """Show a dialog with detailed debug output from the last eBay / Mercari sync."""
+        _DIR = os.path.join(os.path.expanduser("~"), ".baum-reseller")
+        sections: list[str] = []
+
+        for platform in ("ebay", "mercari"):
+            path = os.path.join(_DIR, f"debug_{platform}_sync.json")
+            if not os.path.exists(path):
+                sections.append(f"── {platform.upper()} ──\nNo log yet — run a sync first.\n")
+                continue
+            try:
+                with open(path, encoding="utf-8") as f:
+                    d = json.load(f)
+
+                urls = "\n".join(f"  {u}" for u in d.get("xhr_urls", [])[:20]) or "  (none)"
+                keys = "\n".join(
+                    f"  response {i+1}: {k}"
+                    for i, k in enumerate(d.get("xhr_body_top_keys", []))
+                ) or "  (none)"
+                sample = json.dumps(d.get("sample_items", []), indent=4)
+
+                sections.append(
+                    f"── {platform.upper()} — {d.get('timestamp', '?')} ──\n"
+                    f"XHR responses captured : {d.get('xhr_responses_captured', 0)}\n"
+                    f"Items parsed from XHR  : {d.get('xhr_items_parsed', 0)}\n"
+                    f"Items from DOM (active): {d.get('dom_active_items', 0)}\n"
+                    f"Items from DOM (sold)  : {d.get('dom_sold_items', 0)}\n"
+                    f"Total returned to sync : {d.get('total_returned', 0)}\n"
+                    f"\nXHR URLs captured:\n{urls}\n"
+                    f"\nXHR response body keys:\n{keys}\n"
+                    f"\nSample items returned:\n{sample}\n"
+                )
+            except Exception as exc:
+                sections.append(f"── {platform.upper()} ──\nError reading log: {exc}\n")
+
+        body = "\n\n".join(sections)
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Sync Debug Logs")
+        dlg.resize(760, 540)
+        layout = QVBoxLayout(dlg)
+
+        lbl = QLabel(
+            "This shows exactly what the last sync captured from each platform. "
+            "Share this with support if listings aren't appearing."
+        )
+        lbl.setWordWrap(True)
+        lbl.setStyleSheet("color: #a6adc8; font-size: 11px; margin-bottom: 6px;")
+        layout.addWidget(lbl)
+
+        te = QTextEdit()
+        te.setReadOnly(True)
+        te.setPlainText(body)
+        te.setFontFamily("Consolas")
+        te.setFontPointSize(9)
+        layout.addWidget(te)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok)
+        copy_btn = btns.addButton("📋 Copy to Clipboard", QDialogButtonBox.ActionRole)
+        copy_btn.clicked.connect(
+            lambda: QApplication.clipboard().setText(te.toPlainText())
+        )
+        btns.accepted.connect(dlg.accept)
+        layout.addWidget(btns)
+        dlg.exec()
 
     def _on_all_done(self, total: int, errors: list):
         self._set_busy(False)

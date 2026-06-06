@@ -199,8 +199,30 @@ class MercariService:
 
         dom_results = active_dom + sold_dom
         api_results = _parse_api_responses(intercepted)
-        # Prefer API results if they have more data; always fall back to DOM
-        return api_results if len(api_results) >= len(dom_results) else dom_results
+        result = api_results if len(api_results) >= len(dom_results) else dom_results
+
+        # ── Debug log ─────────────────────────────────────────────────────
+        import json as _json, datetime as _dt
+        _debug = {
+            "timestamp":              _dt.datetime.now().isoformat(),
+            "platform":               "mercari",
+            "xhr_responses_captured": len(intercepted),
+            "xhr_items_parsed":       len(api_results),
+            "dom_active_items":       len(active_dom),
+            "dom_sold_items":         len(sold_dom),
+            "total_returned":         len(result),
+            "sample_items":           result[:3],
+        }
+        _debug_path = os.path.join(
+            os.path.expanduser("~"), ".baum-reseller", "debug_mercari_sync.json"
+        )
+        try:
+            with open(_debug_path, "w", encoding="utf-8") as _f:
+                _json.dump(_debug, _f, indent=2, default=str)
+        except Exception:
+            pass
+
+        return result
 
 
 def _scrape_dom(page, status: str = "active") -> list[dict]:

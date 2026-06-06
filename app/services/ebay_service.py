@@ -177,7 +177,34 @@ class EbayService:
 
         dom_results = active_dom + sold_dom
         parsed = _parse_intercepted(intercepted)
-        return parsed if parsed else dom_results
+        result = parsed if parsed else dom_results
+
+        # ── Debug log ─────────────────────────────────────────────────────
+        # Written after every sync so we can diagnose XHR/DOM capture issues.
+        import json as _json, datetime as _dt
+        _debug = {
+            "timestamp":              _dt.datetime.now().isoformat(),
+            "platform":               "ebay",
+            "xhr_responses_captured": len(intercepted),
+            "xhr_urls":               [r.get("url", "") for r in intercepted[:20]],
+            "xhr_body_top_keys":      [list(r.get("body", {}).keys())[:8]
+                                       for r in intercepted[:10]],
+            "xhr_items_parsed":       len(parsed),
+            "dom_active_items":       len(active_dom),
+            "dom_sold_items":         len(sold_dom),
+            "total_returned":         len(result),
+            "sample_items":           result[:3],
+        }
+        _debug_path = os.path.join(
+            os.path.expanduser("~"), ".baum-reseller", "debug_ebay_sync.json"
+        )
+        try:
+            with open(_debug_path, "w", encoding="utf-8") as _f:
+                _json.dump(_debug, _f, indent=2, default=str)
+        except Exception:
+            pass
+
+        return result
 
 
 def _scrape_seller_hub(page, status: str = "active") -> list[dict]:

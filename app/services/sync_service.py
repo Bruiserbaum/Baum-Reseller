@@ -82,6 +82,7 @@ def _persist_listings(platform: str, listings: list[dict]):
     from app.database.models import (
         upsert_listing, save_item,
         get_item_id_for_listing, upsert_image_url,
+        update_sync_source_if_empty,
     )
     for l in listings:
         # Look up an existing item via the listings table before creating a new one.
@@ -96,6 +97,9 @@ def _persist_listings(platform: str, listings: list[dict]):
                 "category":    infer_category(title),
                 "sync_source": platform,   # remember which platform created this item
             })
+        else:
+            # Existing item — backfill sync_source if it wasn't set previously
+            update_sync_source_if_empty(item_id, platform)
 
         upsert_listing({
             "item_id": item_id,

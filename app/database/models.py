@@ -62,6 +62,16 @@ def save_item(data: dict) -> int:
         return cur.lastrowid
 
 
+def update_sync_source_if_empty(item_id: int, source: str):
+    """Stamp sync_source on an existing item that doesn't have one yet."""
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE items SET sync_source = ? "
+            "WHERE id = ? AND (sync_source IS NULL OR sync_source = '')",
+            (source, item_id),
+        )
+
+
 def delete_item(item_id: int):
     with get_connection() as conn:
         conn.execute("DELETE FROM items WHERE id = ?", (item_id,))

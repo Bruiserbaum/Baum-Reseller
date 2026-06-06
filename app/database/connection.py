@@ -101,6 +101,15 @@ MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS idx_items_created_at  ON items(created_at DESC)",
     # Track which platform originally created each item (even before listings exist)
     "ALTER TABLE items ADD COLUMN sync_source TEXT DEFAULT ''",
+    # Backfill sync_source for existing items that already have listing records
+    """UPDATE items
+       SET sync_source = (
+           SELECT platform FROM listings
+           WHERE listings.item_id = items.id
+           ORDER BY listings.created_at ASC LIMIT 1
+       )
+       WHERE (sync_source IS NULL OR sync_source = '')
+       AND EXISTS (SELECT 1 FROM listings WHERE listings.item_id = items.id)""",
 ]
 
 
