@@ -11,12 +11,15 @@ from app.database.models import get_all_items
 from app.utils.qt_thread import post_to_main
 from app.views.item_detail_view import ItemDetailDialog
 
+# Default column widths (user can drag to resize — saved per session by Qt)
+_COL_WIDTHS = [380, 110, 70, 110, 70, 90, 80]
+
 
 class InventoryView(QWidget):
     def __init__(self):
         super().__init__()
         self._all_items: list[dict] = []
-        self._dirty = False   # False here because refresh() is called immediately below
+        self._dirty = False   # False because refresh() is called immediately below
         self._loading = False
         self._build_ui()
         self.refresh()
@@ -26,7 +29,7 @@ class InventoryView(QWidget):
         layout.setContentsMargins(24, 20, 24, 20)
         layout.setSpacing(12)
 
-        # Header
+        # ── Header ────────────────────────────────────────────────────────
         header = QHBoxLayout()
         title = QLabel("Inventory")
         title.setObjectName("pageTitle")
@@ -45,7 +48,7 @@ class InventoryView(QWidget):
         header.addWidget(add_btn)
         layout.addLayout(header)
 
-        # Filter bar
+        # ── Filter bar ────────────────────────────────────────────────────
         fbar = QHBoxLayout()
         fbar.addWidget(QLabel("Platform:"))
         self.plat_filter = QComboBox()
@@ -59,20 +62,33 @@ class InventoryView(QWidget):
         self.cat_filter.currentTextChanged.connect(self._apply_filter)
         fbar.addWidget(self.cat_filter)
 
+        # Hide Unlisted toggle
+        self._hide_unlisted_btn = QPushButton("Hide Unlisted")
+        self._hide_unlisted_btn.setCheckable(True)
+        self._hide_unlisted_btn.setChecked(False)
+        self._hide_unlisted_btn.toggled.connect(self._apply_filter)
+        fbar.addWidget(self._hide_unlisted_btn)
+
         fbar.addStretch()
         self.count_label = QLabel("0 items")
         fbar.addWidget(self.count_label)
         layout.addLayout(fbar)
 
-        # Table
+        # ── Table ─────────────────────────────────────────────────────────
         self.table = QTableWidget()
         self.table.setColumnCount(7)
         self.table.setHorizontalHeaderLabels(
             ["Title", "Platforms", "Bin", "Category", "Cost", "Listed At", "Status"]
         )
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        for col in range(1, 7):
-            self.table.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeToContents)
+
+        # All columns user-resizable with sensible defaults
+        hdr = self.table.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.Interactive)
+        hdr.setStretchLastSection(False)
+        hdr.setMinimumSectionSize(50)
+        for col, w in enumerate(_COL_WIDTHS):
+            self.table.setColumnWidth(col, w)
+
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
@@ -83,9 +99,7 @@ class InventoryView(QWidget):
     # ── Data ──────────────────────────────────────────────────────────────
 
     def refresh(self):
-        """Fetch all items on a background thread, then render on the main thread.
-        Calling while a fetch is already in-flight is a no-op.
-        """
+        """Fetch all items on a background thread, then render on the main thread."""
         if self._loading:
             return
         self._loading = True
@@ -98,14 +112,12 @@ class InventoryView(QWidget):
         threading.Thread(target=_fetch, daemon=True).start()
 
     def lazy_refresh(self):
-        """Refresh only when data has been marked dirty since the last load.
-        Call this on tab-switch so we don't re-query on every navigation.
-        """
+        """Refresh only when data has been marked dirty since the last load."""
         if self._dirty:
             self.refresh()
 
     def mark_dirty(self):
-        """Mark the data as stale (e.g. after a sync or import completes)."""
+        """Mark data as stale (called after sync / import / enrichment)."""
         self._dirty = True
 
     def _on_data_loaded(self, items: list[dict]):
@@ -127,9 +139,10 @@ class InventoryView(QWidget):
         self.cat_filter.blockSignals(False)
 
     def _apply_filter(self):
-        search = self.search_box.text().lower()
+        search   = self.search_box.text().lower()
         platform = self.plat_filter.currentText()
         category = self.cat_filter.currentText()
+        hide_unlisted = self._hide_unlisted_btn.isChecked()
 
         rows = self._all_items
         if search:
@@ -138,11 +151,13 @@ class InventoryView(QWidget):
             rows = [i for i in rows if platform.lower() in (i.get("platforms") or "").lower()]
         if category != "All":
             rows = [i for i in rows if i.get("category", "") == category]
+        if hide_unlisted:
+            rows = [i for i in rows if (i.get("listing_count") or 0) > 0]
 
         self._render(rows)
 
     def _render(self, items: list[dict]):
-        # Disable repaints and sorting while filling to avoid O(n²) Qt overhead.
+        # Disable repaints and sorting during fill to avoid O(n²) Qt overhead
         self.table.setSortingEnabled(False)
         self.table.setUpdatesEnabled(False)
         self.table.setRowCount(len(items))

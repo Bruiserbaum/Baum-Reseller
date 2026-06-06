@@ -89,7 +89,12 @@ def _persist_listings(platform: str, listings: list[dict]):
         # scrapers don't carry a DB item_id.
         item_id = get_item_id_for_listing(platform, l["listing_id"])
         if not item_id:
-            item_id = save_item({"title": l.get("title", "Untitled")})
+            from app.services.enrich_service import infer_category
+            title = l.get("title", "Untitled")
+            item_id = save_item({
+                "title": title,
+                "category": infer_category(title),
+            })
 
         upsert_listing({
             "item_id": item_id,

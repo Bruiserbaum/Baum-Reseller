@@ -84,6 +84,13 @@ class MainWindow(QMainWindow):
         status_timer.timeout.connect(self._refresh_status)
         status_timer.start(60_000)
 
+        # Start background idle enrichment (fills description/category/images over time)
+        from app.services.enrich_service import start_idle_enrichment
+        start_idle_enrichment()
+
+        # One-time pass: apply keyword-based category to any item that has none
+        QTimer.singleShot(2_000, self._backfill_categories)
+
         # Run background notification checks on startup (5s delay) then every 4h
         QTimer.singleShot(5_000, self._run_checks)
         check_timer = QTimer(self)
@@ -171,6 +178,31 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(0, lambda: self._update_alert_badge(get_unread_count()))
 
         run_checks_async(done_cb=_done)
+
+    def _backfill_categories(self):
+        """One-time background pass: assign keyword-inferred categories to existing
+        items that have none. Runs once on startup, no network required."""
+        import threading
+
+        def _worker():
+            from app.services.enrich_service import infer_category
+            from app.database.connection import get_connection
+            with get_connection() as conn:
+                rows = conn.execute(
+                    "SELECT id, title FROM items WHERE category IS NULL OR category = ''"
+                ).fetchall()
+                updates = [
+                    (infer_category(r["title"]), r["id"])
+                    for r in rows
+                    if infer_category(r["title"])
+                ]
+                if updates:
+                    conn.executemany("UPDATE items SET category=? WHERE id=?", updates)
+            if updates:
+                from app.utils.qt_thread import post_to_main
+                post_to_main(self.inventory_view.mark_dirty)
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _refresh_status(self):
         last = get_setting("last_sync_time", "Never")

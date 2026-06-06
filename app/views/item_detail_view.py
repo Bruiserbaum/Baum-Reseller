@@ -37,6 +37,11 @@ class ItemDetailDialog(QDialog):
         self._build_ui()
         self._load_data()
 
+        # If this item is missing a description, kick off background enrichment
+        # immediately so it populates while the user is looking at the dialog.
+        if item_id and not (self._item or {}).get("description"):
+            self._start_enrichment()
+
     # ── UI construction ───────────────────────────────────────────────────
 
     def _build_ui(self):
@@ -91,13 +96,14 @@ class ItemDetailDialog(QDialog):
         self.category_edit.textChanged.connect(self._on_change)
         core_form.addRow("Category", self.category_edit)
 
-        sync_note = QLabel(
-            "Tip: Description and Category are not captured during platform sync — "
-            "fill them in here, or pre-populate via the Import CSV."
+        # Shows enrichment progress / hint; updated dynamically
+        self._enrich_lbl = QLabel(
+            "Description and Category are fetched automatically in the background. "
+            "You can also fill them in manually or via CSV Import."
         )
-        sync_note.setWordWrap(True)
-        sync_note.setStyleSheet("color: #585b70; font-size: 10px; font-style: italic;")
-        core_form.addRow("", sync_note)
+        self._enrich_lbl.setWordWrap(True)
+        self._enrich_lbl.setStyleSheet("color: #585b70; font-size: 10px; font-style: italic;")
+        core_form.addRow("", self._enrich_lbl)
 
         self.bin_edit = QLineEdit()
         self.bin_edit.setPlaceholderText("e.g. A3, Shelf 2")
@@ -234,6 +240,53 @@ class ItemDetailDialog(QDialog):
             self.img_label.setPixmap(pix)
         else:
             self.img_label.setText("No image")
+
+    # ── Background enrichment ─────────────────────────────────────────────
+
+    def _start_enrichment(self):
+        """Kick off a background fetch of description / category / images."""
+        self._enrich_lbl.setText("⟳  Fetching details from platform listing…")
+        from app.services.enrich_service import enrich_item
+        enrich_item(self._item_id, done_cb=self._on_enriched)
+
+    def _on_enriched(self, updated: bool):
+        """Called on the main thread when background enrichment finishes."""
+        if not updated:
+            self._enrich_lbl.setText(
+                "Could not auto-fetch details — fill them in manually or via CSV Import."
+            )
+            return
+
+        self._enrich_lbl.setText("✓  Details fetched from platform listing.")
+
+        # Reload item from DB and push new values into fields without
+        # triggering auto-save (block signals during the update).
+        self._item = get_item(self._item_id)
+        if not self._item:
+            return
+
+        for widget in (self.title_edit, self.desc_edit, self.category_edit):
+            widget.blockSignals(True)
+
+        self.title_edit.setText(self._item.get("title", ""))
+        self.desc_edit.setPlainText(self._item.get("description", ""))
+        self.category_edit.setText(self._item.get("category", ""))
+
+        for widget in (self.title_edit, self.desc_edit, self.category_edit):
+            widget.blockSignals(False)
+
+        # Refresh image list with any newly discovered images
+        had_images = self.img_list.count() > 0
+        self.img_list.clear()
+        for img in self._item.get("images", []):
+            local = img.get("local_path", "")
+            url   = img.get("source_url", "")
+            label = local or url or "(no path)"
+            lw_item = QListWidgetItem(label)
+            lw_item.setData(Qt.UserRole, url)
+            self.img_list.addItem(lw_item)
+        if self.img_list.count() and not had_images:
+            self.img_list.setCurrentRow(0)
 
     # ── Auto-save ─────────────────────────────────────────────────────────
 
