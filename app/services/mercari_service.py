@@ -155,14 +155,19 @@ class MercariService:
             if progress_cb:
                 progress_cb("Loading Mercari listings…")
 
+            # Mercari fires continuous analytics/ad pings — use "load" so we
+            # don't wait for networkidle (which never arrives), then let the
+            # SPA settle before we start scraping/intercepting XHR.
             page.goto("https://www.mercari.com/mypage/listings/",
-                      wait_until="networkidle", timeout=30_000)
+                      wait_until="load", timeout=30_000)
+            page.wait_for_timeout(3_000)
             for _ in range(5):
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 page.wait_for_timeout(1_200)
 
             page.goto("https://www.mercari.com/mypage/listings/?status=sold_out",
-                      wait_until="networkidle", timeout=30_000)
+                      wait_until="load", timeout=30_000)
+            page.wait_for_timeout(3_000)
             for _ in range(3):
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 page.wait_for_timeout(1_000)

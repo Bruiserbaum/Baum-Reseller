@@ -188,14 +188,19 @@ class PoshmarkService:
             if progress_cb:
                 progress_cb(f"Loading closet for @{username}…")
 
+            # Poshmark fires continuous analytics/ad pings — use "load" so we
+            # don't wait for networkidle (which never arrives), then let the
+            # SPA settle before we start scraping/intercepting XHR.
             page.goto(f"https://poshmark.com/closet/{username}",
-                      wait_until="networkidle", timeout=30_000)
+                      wait_until="load", timeout=30_000)
+            page.wait_for_timeout(3_000)
             for _ in range(6):
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 page.wait_for_timeout(1_200)
 
             page.goto(f"https://poshmark.com/closet/{username}?availability=sold_out",
-                      wait_until="networkidle", timeout=30_000)
+                      wait_until="load", timeout=30_000)
+            page.wait_for_timeout(3_000)
             for _ in range(3):
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 page.wait_for_timeout(1_000)
