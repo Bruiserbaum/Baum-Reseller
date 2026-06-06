@@ -103,11 +103,20 @@ class EbayService:
 
         def _on_response(response):
             url = response.url
-            if "ebay.com/sh/" in url and response.request.resource_type in ("xhr", "fetch"):
-                try:
-                    intercepted.append({"url": url, "body": response.json()})
-                except Exception:
-                    pass
+            rtype = response.request.resource_type
+            # Cast a wide net: capture any JSON coming from eBay's servers
+            # (Seller Hub SPA may call /sh/api/..., api.ebay.com, or others)
+            if rtype not in ("xhr", "fetch"):
+                return
+            if not any(h in url for h in ("ebay.com/sh/", "api.ebay.com",
+                                           "selling.ebay.com", "ebay.com/mye/")):
+                return
+            try:
+                data = response.json()
+                if isinstance(data, dict):
+                    intercepted.append({"url": url, "body": data})
+            except Exception:
+                pass
 
         with sync_playwright() as p:
             browser, ctx = headless_context(p, SESSION)
@@ -117,91 +126,237 @@ class EbayService:
             if progress_cb:
                 progress_cb("Checking eBay session…")
 
-            # eBay Seller Hub runs background analytics pings indefinitely, so
-            # "networkidle" never fires.  "load" waits for the page + its static
-            # assets, then we give the SPA an extra 3 s to fire its XHR calls.
+            # "load" + explicit selector wait is more reliable than "networkidle"
+            # (eBay fires background analytics pings indefinitely).
             page.goto(ACTIVE_URL, wait_until="load", timeout=30_000)
-            page.wait_for_timeout(3_000)   # let Vue/XHR initialise
 
             if any(a in page.url for a in _AUTH):
                 browser.close()
                 self.clear_session()
                 raise ValueError("eBay session expired — please re-authenticate.")
 
+            # Wait for the listing table to appear, then give XHR extra time
+            try:
+                page.wait_for_selector(
+                    '[class*="shui-dt-row"], [class*="sh-llt__row"], '
+                    '[class*="listing-row"], [data-testid*="listing"]',
+                    timeout=10_000,
+                )
+            except Exception:
+                pass  # proceed even if selector not found
+            page.wait_for_timeout(2_000)
+
             if progress_cb:
                 progress_cb("Loading eBay active listings…")
 
-            for _ in range(5):
+            # Scroll to trigger lazy pagination
+            for _ in range(6):
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                page.wait_for_timeout(1_000)
+                page.wait_for_timeout(800)
+
+            # Capture DOM before navigating away
+            active_dom = _scrape_seller_hub(page, status="active")
+
+            if progress_cb:
+                progress_cb("Loading eBay sold listings…")
 
             page.goto(SOLD_URL, wait_until="load", timeout=30_000)
-            page.wait_for_timeout(3_000)   # let Vue/XHR initialise
-            for _ in range(3):
-                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                page.wait_for_timeout(1_000)
+            try:
+                page.wait_for_selector(
+                    '[class*="shui-dt-row"], [class*="sh-llt__row"], '
+                    '[class*="listing-row"], [data-testid*="listing"]',
+                    timeout=10_000,
+                )
+            except Exception:
+                pass
+            page.wait_for_timeout(2_000)
 
-            dom_results = _scrape_seller_hub(page)
+            for _ in range(4):
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                page.wait_for_timeout(800)
+
+            sold_dom = _scrape_seller_hub(page, status="sold")
             browser.close()
 
-        return _parse_intercepted(intercepted) or dom_results
+        dom_results = active_dom + sold_dom
+        parsed = _parse_intercepted(intercepted)
+        return parsed if parsed else dom_results
 
 
-def _scrape_seller_hub(page) -> list[dict]:
-    items = page.evaluate("""
-        () => Array.from(document.querySelectorAll(
-            '.sh-llt__row, [class*="listing-row"], .shui-dt-row'
-        )).map(row => {
-            const link  = row.querySelector('a[href*="/itm/"]');
-            const title = row.querySelector('[class*="title"], [class*="item-title"]');
-            const price = row.querySelector('[class*="price"]');
-            return {
-                url:   link  ? link.href               : '',
-                title: title ? title.textContent.trim() : '',
-                price: price ? price.textContent.replace(/[^0-9.]/g, '') : '0',
-            };
-        }).filter(i => i.url)
+def _scrape_seller_hub(page, status: str = "active") -> list[dict]:
+    """
+    DOM fallback: walk every /itm/ anchor in the current page and harvest
+    title + price from its nearest container.  Works regardless of which
+    CSS classes eBay uses on a given day.
+    """
+    raw = page.evaluate(r"""
+        () => {
+            const seen = new Set();
+            const results = [];
+            for (const link of document.querySelectorAll('a[href*="/itm/"]')) {
+                const m = link.href.match(/\/itm\/(\d+)/);
+                if (!m) continue;
+                const lid = m[1];
+                if (seen.has(lid)) continue;
+                seen.add(lid);
+
+                // Walk up to find the row / card container
+                const container = link.closest(
+                    'tr, [class*="row"], [class*="item"], [class*="listing"], li'
+                ) || link.parentElement;
+
+                // Title: prefer a dedicated title element; fall back to link text
+                let title = '';
+                if (container) {
+                    const tel = container.querySelector(
+                        '[class*="title"], [data-testid*="title"], h3, h4, h2'
+                    );
+                    if (tel) title = tel.textContent.trim();
+                }
+                if (!title) title = link.textContent.trim();
+                if (!title) title = 'Untitled';
+
+                // Price
+                let price = '0';
+                if (container) {
+                    const pel = container.querySelector('[class*="price"]');
+                    if (pel) {
+                        const pm = pel.textContent.match(/[\d,]+\.?\d*/);
+                        if (pm) price = pm[0].replace(/,/g, '');
+                    }
+                }
+
+                results.push({ url: link.href, title, price });
+            }
+            return results;
+        }
     """)
     results = []
-    for item in items:
+    seen: set[str] = set()
+    for item in (raw or []):
         m = re.search(r"/itm/(\d+)", item.get("url", ""))
         lid = m.group(1) if m else ""
-        if not lid:
+        if not lid or lid in seen:
             continue
+        seen.add(lid)
+        try:
+            price_val = float(item.get("price") or 0)
+        except (ValueError, TypeError):
+            price_val = 0.0
         results.append({
             "listing_id": lid,
             "title":      item.get("title", "Untitled"),
             "url":        item.get("url", ""),
-            "price":      float(item.get("price") or 0),
-            "status":     "active",
+            "price":      price_val,
+            "status":     status,
             "img_url":    "",
         })
     return results
 
 
+def _extract_item_list(body: dict) -> list:
+    """
+    Search a JSON response body for a list that looks like listing records.
+    Returns the first non-empty list found, or [].
+    """
+    if not isinstance(body, dict):
+        return []
+
+    # Direct top-level keys
+    for key in ("items", "listings", "itemCollection", "itemList",
+                "entries", "activeListings", "soldListings", "results",
+                "listingCollection"):
+        val = body.get(key)
+        if isinstance(val, list) and val:
+            return val
+        if isinstance(val, dict):
+            for subkey in ("items", "listing", "entries", "results"):
+                sub = val.get(subkey)
+                if isinstance(sub, list) and sub:
+                    return sub
+
+    # One level deep under common wrapper keys
+    for wrapper in ("data", "result", "payload", "response",
+                    "searchResult", "body", "content"):
+        sub = body.get(wrapper)
+        if not isinstance(sub, dict):
+            continue
+        for key in ("items", "listings", "item", "entries", "results",
+                    "activeListings", "soldListings", "listingCollection"):
+            val = sub.get(key)
+            if isinstance(val, list) and val:
+                return val
+            if isinstance(val, dict):
+                for subkey in ("items", "listing", "entries"):
+                    deep = val.get(subkey)
+                    if isinstance(deep, list) and deep:
+                        return deep
+
+    return []
+
+
 def _parse_intercepted(responses: list[dict]) -> list[dict]:
     seen, results = set(), []
     for resp in responses:
-        body = resp.get("body", {})
-        items = (body.get("items") or body.get("listings") or
-                 body.get("data", {}).get("items") or [])
+        items = _extract_item_list(resp.get("body", {}))
         for item in items:
             if not isinstance(item, dict):
                 continue
-            lid = str(item.get("itemId") or item.get("id") or "")
+
+            # Item ID — try several field names
+            lid = str(
+                item.get("itemId") or item.get("id") or
+                item.get("listingId") or item.get("listing_id") or ""
+            ).strip()
             if not lid or lid in seen:
                 continue
             seen.add(lid)
-            status_raw = str(item.get("listingStatus") or item.get("status") or "active").lower()
-            status = "sold" if "sold" in status_raw or "completed" in status_raw else "active"
-            price = item.get("currentPrice", {}) or item.get("price", {})
-            price_val = float(price.get("value", 0)) if isinstance(price, dict) else float(price or 0)
+
+            # Status
+            status_raw = str(
+                item.get("listingStatus") or item.get("status") or
+                item.get("sellingState") or "active"
+            ).lower()
+            status = (
+                "sold"
+                if any(s in status_raw for s in ("sold", "completed", "ended"))
+                else "active"
+            )
+
+            # Price — may be nested {value, currencyCode} or a bare number
+            price_obj = (
+                item.get("currentPrice") or item.get("price") or
+                item.get("buyItNowPrice") or item.get("soldPrice") or {}
+            )
+            if isinstance(price_obj, dict):
+                price_val = float(
+                    price_obj.get("value") or price_obj.get("amount") or 0
+                )
+            else:
+                try:
+                    price_val = float(price_obj or 0)
+                except (ValueError, TypeError):
+                    price_val = 0.0
+
+            title = (
+                item.get("title") or item.get("name") or
+                item.get("itemTitle") or "Untitled"
+            )
+            url = (
+                item.get("viewItemURL") or item.get("url") or
+                item.get("listingUrl") or f"https://www.ebay.com/itm/{lid}"
+            )
+            img = (
+                item.get("galleryURL") or item.get("pictureUrl") or
+                item.get("imageUrl") or item.get("thumbnail") or ""
+            )
+
             results.append({
                 "listing_id": lid,
-                "title":      item.get("title") or "Untitled",
-                "url":        item.get("viewItemURL") or f"https://www.ebay.com/itm/{lid}",
+                "title":      title,
+                "url":        url,
                 "price":      price_val,
                 "status":     status,
-                "img_url":    item.get("galleryURL") or item.get("pictureUrl") or "",
+                "img_url":    img,
             })
     return results

@@ -13,7 +13,7 @@ from app.utils.qt_thread import post_to_main
 from app.views.item_detail_view import ItemDetailDialog
 
 # Default column widths — user can drag to resize
-_COL_WIDTHS = [380, 110, 70, 110, 70, 90, 80]
+_COL_WIDTHS = [360, 110, 60, 140, 70, 90, 80]
 
 
 class InventoryView(QWidget):

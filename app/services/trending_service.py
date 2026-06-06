@@ -229,49 +229,93 @@ def _fetch_with_playwright(url: str) -> list[dict]:
         )
         ctx = browser.new_context(user_agent=_UA)
         page = ctx.new_page()
-        page.goto(url, wait_until="domcontentloaded", timeout=25_000)
+        page.goto(url, wait_until="load", timeout=25_000)
+        # Wait for listing titles to render (eBay lazy-renders the grid)
+        try:
+            page.wait_for_selector(".s-item__title", timeout=8_000)
+        except Exception:
+            pass  # proceed anyway — parse whatever we have
         html = page.content()
         browser.close()
-    return _parse_ebay_html(html)
+    listings = _parse_ebay_html(html)
+    if not listings:
+        raise RuntimeError("No listings parsed from Playwright page")
+    return listings
 
 
 def _parse_ebay_html(html: str) -> list[dict]:
     """
-    Parse eBay search results HTML.
-    Extracts title, sold price, and URL for each listing.
+    Parse eBay search-results HTML into a list of {title, price, url} dicts.
+
+    eBay's title markup has changed over time.  We try four patterns in order:
+      1. Modern:  <h3 class="s-item__title"><span role="heading">TITLE</span></h3>
+      2. Any:     <span role="heading">TITLE</span>  (≥6 chars)
+      3. Legacy:  <span class="BOLD">TITLE</span>
+      4. Fallback: strip tags from <h3 class="s-item__title">…</h3>
     """
     listings = []
     seen_titles: set[str] = set()
 
-    # Each item block ends at the next s-item or end of list
-    # Strategy: find all anchor+title+price triplets within .s-item containers
-    # Using a multi-pass regex approach for reliability
-
-    # Step 1: split by item containers
+    # Split into per-item chunks on <li class="s-item…"> boundaries
     chunks = re.split(r'(?=<li[^>]*\bs-item\b[^>]*>)', html)
 
     for chunk in chunks:
-        # Extract href (listing URL)
-        url_m = re.search(r'<a[^>]+class="[^"]*s-item__link[^"]*"[^>]*href="([^"]+)"', chunk)
+        # Skip the promotional "Shop on eBay" ghost item
+        if "Shop on eBay" in chunk:
+            continue
+
+        # ── Listing URL ───────────────────────────────────────────────────
+        url_m = re.search(
+            r'<a[^>]+class="[^"]*s-item__link[^"]*"[^>]*href="([^"]+)"', chunk
+        )
         if not url_m:
             continue
         item_url = url_m.group(1).split("?")[0]
 
-        # Extract title (BOLD span or s-item__title span)
-        title_m = re.search(
-            r'<span[^>]+(?:BOLD|s-item__title)[^>]*>([^<]+)</span>',
-            chunk
+        # ── Title — four fallback patterns ────────────────────────────────
+        title: str | None = None
+
+        # 1. Modern eBay: <h3 class="s-item__title"><span role="heading">TITLE</span>
+        m = re.search(
+            r'<h3[^>]+s-item__title[^>]*>.*?<span[^>]*role=["\']heading["\'][^>]*>([^<]+)</span>',
+            chunk, re.DOTALL | re.IGNORECASE,
         )
-        if not title_m:
+        if m:
+            title = m.group(1).strip()
+
+        # 2. Any <span role="heading"> with enough text (catches other layouts)
+        if not title:
+            m = re.search(
+                r'<span[^>]+role=["\']heading["\'][^>]*>([^<]{6,})</span>',
+                chunk, re.IGNORECASE,
+            )
+            if m:
+                title = m.group(1).strip()
+
+        # 3. Legacy eBay: <span class="BOLD">TITLE</span>
+        if not title:
+            m = re.search(
+                r'<span[^>]+class="[^"]*BOLD[^"]*"[^>]*>([^<]+)</span>', chunk
+            )
+            if m:
+                title = m.group(1).strip()
+
+        # 4. Last resort: strip all tags from the h3 block
+        if not title:
+            m = re.search(
+                r'<h3[^>]+s-item__title[^>]*>(.*?)</h3>', chunk, re.DOTALL
+            )
+            if m:
+                title = re.sub(r'<[^>]+>', '', m.group(1)).strip()
+
+        if not title or len(title) < 6:
             continue
-        title = re.sub(r'\s+', ' ', title_m.group(1)).strip()
-        if not title or "Shop on eBay" in title or len(title) < 6:
-            continue
+        title = re.sub(r'\s+', ' ', title)
         if title in seen_titles:
             continue
         seen_titles.add(title)
 
-        # Extract price (first monetary amount in the chunk)
+        # ── Price ─────────────────────────────────────────────────────────
         price_m = re.search(r'\$([\d,]+\.?\d*)', chunk)
         price = f"${price_m.group(1)}" if price_m else ""
 
