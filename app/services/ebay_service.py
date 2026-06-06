@@ -13,15 +13,45 @@ DOMAIN     = "ebay.com"
 SESSION    = os.path.join(os.path.expanduser("~"), ".baum-reseller", "ebay_session.json")
 PROFILE    = os.path.join(os.path.expanduser("~"), ".baum-reseller", "ebay_profile")
 LOGIN_URL  = "https://www.ebay.com/signin/"
-ACTIVE_URL = "https://www.ebay.com/sh/lst/active"
-SOLD_URL   = "https://www.ebay.com/sh/lst/sold"
 
+# Primary: Seller Hub.  Fallback: legacy My eBay (some accounts use this).
+ACTIVE_URL        = "https://www.ebay.com/sh/lst/active"
+SOLD_URL          = "https://www.ebay.com/sh/lst/sold"
+MYEBAY_ACTIVE_URL = "https://www.ebay.com/mye/myebay/active"
+MYEBAY_SOLD_URL   = "https://www.ebay.com/mye/myebay/sold"
+
+# URL patterns that indicate an auth/captcha redirect
 _AUTH = ("/signin", "/verify", "/challenge", "/otp", "/confirm",
-         "/security", "/two-factor", "/auth/")
+         "/security", "/two-factor", "/auth/", "/captcha",
+         "signin.ebay.com")
 
 
 def _is_logged_in(url: str) -> bool:
     return "ebay.com" in url and not any(a in url for a in _AUTH)
+
+
+def _is_blocked(page) -> bool:
+    """
+    Return True if eBay served a captcha / bot-block page.
+    Checks both the final URL and live DOM elements.
+    """
+    url = page.url
+    if any(a in url for a in _AUTH):
+        return True
+    try:
+        # hCaptcha / reCaptcha overlay or eBay's own captcha widget
+        blocked = page.evaluate("""
+            () => !!(
+                document.querySelector('[class*="captcha"], [id*="captcha"]') ||
+                document.querySelector('iframe[src*="hcaptcha"], iframe[src*="recaptcha"]') ||
+                document.querySelector('[class*="bot-check"], [class*="robot-check"]') ||
+                (document.title || '').toLowerCase().includes('captcha') ||
+                (document.title || '').toLowerCase().includes('robot')
+            )
+        """)
+        return bool(blocked)
+    except Exception:
+        return False
 
 
 class EbayService:
@@ -68,6 +98,19 @@ class EbayService:
         from app.utils.browser import import_cookies_from_file
         return import_cookies_from_file(file_path, SESSION)
 
+    def login(self, done_cb=None):
+        """
+        Open Playwright's own headed Chromium browser for direct eBay login.
+        Supports MFA, captcha, and any sign-in flow.  Session saved automatically.
+        """
+        from app.services.session_manager import open_login_browser
+        open_login_browser(
+            platform="ebay",
+            start_url=LOGIN_URL,
+            success_glob="https://www.ebay.com/",
+            done_cb=done_cb,
+        )
+
     # ── Connection test ───────────────────────────────────────────────────
 
     def test_connection(self) -> tuple[bool, str]:
@@ -82,9 +125,9 @@ class EbayService:
                 browser, ctx = headless_context(p, SESSION)
                 page = ctx.new_page()
                 page.goto(ACTIVE_URL, wait_until="domcontentloaded", timeout=20_000)
-                url = page.url
+                blocked = _is_blocked(page)
                 browser.close()
-            if any(a in url for a in _AUTH):
+            if blocked:
                 self.clear_session()
                 return False, "Session expired — click 'Login with Browser' again."
             return True, "Connected to eBay ✓"
@@ -123,43 +166,57 @@ class EbayService:
             if progress_cb:
                 progress_cb("Checking eBay session…")
 
-            # "load" + explicit selector wait is more reliable than "networkidle"
-            # (eBay fires background analytics pings indefinitely).
+            # ── Try Seller Hub first, fall back to My eBay Active ─────────
             page.goto(ACTIVE_URL, wait_until="load", timeout=30_000)
 
-            if any(a in page.url for a in _AUTH):
-                browser.close()
-                self.clear_session()
-                raise ValueError("eBay session expired — please re-authenticate.")
+            if _is_blocked(page):
+                # Seller Hub blocked — try the legacy My eBay interface
+                if progress_cb:
+                    progress_cb("Seller Hub blocked, trying My eBay Active…")
+                page.goto(MYEBAY_ACTIVE_URL, wait_until="load", timeout=30_000)
+                if _is_blocked(page):
+                    browser.close()
+                    self.clear_session()
+                    raise ValueError(
+                        "eBay session expired — please re-authenticate.\n\n"
+                        "Go to Settings → eBay → Login (Browser) to refresh your session."
+                    )
 
-            # Wait for the listing table to appear, then give XHR extra time
+            # Wait for listing links to appear
             try:
                 page.wait_for_selector(
+                    'a[href*="/itm/"], '
                     '[class*="shui-dt-row"], [class*="sh-llt__row"], '
                     '[class*="listing-row"], [data-testid*="listing"]',
                     timeout=10_000,
                 )
             except Exception:
-                pass  # proceed even if selector not found
+                pass
             page.wait_for_timeout(2_000)
 
             if progress_cb:
                 progress_cb("Loading eBay active listings…")
 
-            # Scroll to trigger lazy pagination
             for _ in range(6):
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 page.wait_for_timeout(800)
 
-            # Capture DOM before navigating away
             active_dom = _scrape_seller_hub(page, status="active")
 
             if progress_cb:
                 progress_cb("Loading eBay sold listings…")
 
-            page.goto(SOLD_URL, wait_until="load", timeout=30_000)
+            # Navigate to matching sold URL (Seller Hub or My eBay)
+            sold_target = (
+                MYEBAY_SOLD_URL if MYEBAY_ACTIVE_URL in page.url else SOLD_URL
+            )
+            page.goto(sold_target, wait_until="load", timeout=30_000)
+            if _is_blocked(page):
+                page.goto(MYEBAY_SOLD_URL, wait_until="load", timeout=30_000)
+
             try:
                 page.wait_for_selector(
+                    'a[href*="/itm/"], '
                     '[class*="shui-dt-row"], [class*="sh-llt__row"], '
                     '[class*="listing-row"], [data-testid*="listing"]',
                     timeout=10_000,
