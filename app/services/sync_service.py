@@ -92,8 +92,9 @@ def _persist_listings(platform: str, listings: list[dict]):
             from app.services.enrich_service import infer_category
             title = l.get("title", "Untitled")
             item_id = save_item({
-                "title": title,
-                "category": infer_category(title),
+                "title":       title,
+                "category":    infer_category(title),
+                "sync_source": platform,   # remember which platform created this item
             })
 
         upsert_listing({

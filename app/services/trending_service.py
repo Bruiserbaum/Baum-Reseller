@@ -219,29 +219,47 @@ def _fetch_with_requests(url: str) -> list[dict]:
     return listings
 
 
+_EBAY_SESSION = os.path.join(
+    os.path.expanduser("~"), ".baum-reseller", "ebay_session.json"
+)
+
+
 def _fetch_with_playwright(url: str) -> list[dict]:
+    """
+    Load an eBay search page with Playwright and extract listing cards.
+
+    If the user has a saved eBay session (from the Sync tab) we reuse those
+    cookies — this makes eBay serve real results instead of a bot-check page.
+    Falls back to an anonymous context when no session is available.
+    """
     from playwright.sync_api import sync_playwright
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage",
-                  "--disable-blink-features=AutomationControlled"],
-        )
-        ctx = browser.new_context(
-            user_agent=_UA,
-            viewport={"width": 1280, "height": 800},
-            locale="en-US",
-        )
+        # ── Browser / context setup ───────────────────────────────────────
+        if os.path.exists(_EBAY_SESSION):
+            # Reuse logged-in session → bypasses bot detection
+            from app.utils.browser import headless_context
+            browser, ctx = headless_context(p, _EBAY_SESSION)
+        else:
+            browser = p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage",
+                      "--disable-blink-features=AutomationControlled"],
+            )
+            ctx = browser.new_context(
+                user_agent=_UA,
+                viewport={"width": 1280, "height": 800},
+                locale="en-US",
+            )
+
         page = ctx.new_page()
         page.goto(url, wait_until="load", timeout=25_000)
-        # Wait for listing grid to render (eBay lazy-renders results)
+        # Wait for the result grid to render (eBay lazy-loads search results)
         try:
             page.wait_for_selector(".s-item__title", timeout=8_000)
         except Exception:
-            pass
+            pass  # proceed with whatever is in the DOM
 
-        # Query the live DOM directly — far more reliable than regex-parsing
-        # the raw HTML, which breaks whenever eBay changes their markup.
+        # ── Extract from live DOM — no HTML parsing needed ────────────────
         raw = page.evaluate("""
             () => Array.from(document.querySelectorAll('.s-item')).map(el => {
                 const titleEl = el.querySelector(
@@ -259,14 +277,14 @@ def _fetch_with_playwright(url: str) -> list[dict]:
             )
         """)
 
-        # Capture HTML before closing (fallback if DOM eval returns nothing)
+        # Capture HTML before closing — used as last-chance fallback
         html = page.content() if not raw else ""
         browser.close()
 
     if raw:
         return [{"title": i["title"], "price": i["price"], "url": i["url"]}
                 for i in raw]
-    # Last-chance: regex parse the captured HTML
+    # Last resort: regex-parse the captured HTML
     return _parse_ebay_html(html)
 
 

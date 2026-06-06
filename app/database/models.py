@@ -8,9 +8,14 @@ def get_all_items() -> list[dict]:
     with get_connection() as conn:
         rows = conn.execute("""
             SELECT i.*,
-                   -- platforms: show ALL platforms that have ANY listing (active or sold)
-                   (SELECT GROUP_CONCAT(DISTINCT l2.platform)
-                    FROM listings l2 WHERE l2.item_id = i.id) AS platforms,
+                   -- platforms: ALL platforms with any listing (active or sold).
+                   -- Falls back to sync_source so items created by sync but missing
+                   -- a listing record still show their origin platform.
+                   COALESCE(
+                       (SELECT GROUP_CONCAT(DISTINCT l2.platform)
+                        FROM listings l2 WHERE l2.item_id = i.id),
+                       NULLIF(i.sync_source, '')
+                   ) AS platforms,
                    -- listing_count: only active listings (drives "X active" badge)
                    COUNT(DISTINCT CASE WHEN l.status = 'active' THEN l.id END) AS listing_count,
                    -- sold_count: sold listings (so we can display "Sold" instead of "Unlisted")
@@ -41,7 +46,7 @@ def get_item(item_id: int) -> Optional[dict]:
 
 def save_item(data: dict) -> int:
     fields = ("title", "description", "bin_location", "category",
-              "purchase_cost", "purchase_date", "notes")
+              "purchase_cost", "purchase_date", "notes", "sync_source")
     values = tuple(data.get(f, "" if f != "purchase_cost" else 0) for f in fields)
     with get_connection() as conn:
         if data.get("id"):

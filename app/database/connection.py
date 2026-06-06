@@ -99,6 +99,8 @@ MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS idx_listings_item_id ON listings(item_id)",
     "CREATE INDEX IF NOT EXISTS idx_listings_status   ON listings(status)",
     "CREATE INDEX IF NOT EXISTS idx_items_created_at  ON items(created_at DESC)",
+    # Track which platform originally created each item (even before listings exist)
+    "ALTER TABLE items ADD COLUMN sync_source TEXT DEFAULT ''",
 ]
 
 

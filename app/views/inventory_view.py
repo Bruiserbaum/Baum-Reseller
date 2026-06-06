@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QLineEdit, QHeaderView, QAbstractItemView,
     QComboBox, QProgressBar, QStackedWidget, QFrame
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor
 
 from app.database.models import get_all_items
@@ -125,12 +125,13 @@ class InventoryView(QWidget):
             ["Title", "Platforms", "Bin", "Category", "Cost", "Listed At", "Status"]
         )
         hdr = self.table.horizontalHeader()
-        hdr.setSectionResizeMode(QHeaderView.Interactive)   # default: all draggable
-        hdr.setSectionResizeMode(0, QHeaderView.Stretch)    # Title fills leftover width
+        hdr.setSectionResizeMode(QHeaderView.Interactive)   # ALL columns stay draggable
         hdr.setStretchLastSection(False)
         hdr.setMinimumSectionSize(50)
         for col, w in enumerate(_COL_WIDTHS, start=1):     # cols 1-6 get fixed starts
             self.table.setColumnWidth(col, w)
+        # When the user drags any non-title column, the title absorbs the slack
+        hdr.sectionResized.connect(self._on_col_resized)
 
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -140,6 +141,26 @@ class InventoryView(QWidget):
         tp_layout.addWidget(self.table)
 
         self._stack.addWidget(table_page)    # index 1
+
+    # ── Column auto-fit ───────────────────────────────────────────────────
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Defer one tick so the table viewport has updated its dimensions first
+        QTimer.singleShot(0, self._fit_title_col)
+
+    def _on_col_resized(self, col: int, _old: int, _new: int):
+        """When any non-title column is dragged, title absorbs the slack."""
+        if col != 0:
+            self._fit_title_col()
+
+    def _fit_title_col(self):
+        """Set title column to fill all remaining horizontal space."""
+        vp_width = self.table.viewport().width()
+        other_width = sum(
+            self.table.columnWidth(c) for c in range(1, self.table.columnCount())
+        )
+        self.table.setColumnWidth(0, max(100, vp_width - other_width))
 
     # ── Data ──────────────────────────────────────────────────────────────
 
