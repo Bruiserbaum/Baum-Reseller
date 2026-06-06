@@ -88,8 +88,9 @@ def import_rows(rows: list[dict], progress_cb=None) -> tuple[int, int, list[str]
     errors: list[str] = []
 
     total = len(rows)
+    _report_every = max(1, total // 50)   # report at most ~50 times total
     for i, row in enumerate(rows):
-        if progress_cb:
+        if progress_cb and (i % _report_every == 0 or i == total - 1):
             progress_cb(i + 1, total)
         try:
             title = (row.get("title") or "").strip()

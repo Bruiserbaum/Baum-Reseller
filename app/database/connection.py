@@ -77,13 +77,6 @@ END;
 """
 
 
-def get_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
-
-
 MIGRATIONS = [
     # Add shipped_date + tracking to sales
     "ALTER TABLE sales ADD COLUMN shipped_date TEXT DEFAULT NULL",
@@ -102,7 +95,22 @@ MIGRATIONS = [
         dismissed INTEGER DEFAULT 0,
         FOREIGN KEY (item_id) REFERENCES items(id) ON DELETE CASCADE
     )""",
+    # Indexes for get_all_items() GROUP BY + JOIN performance
+    "CREATE INDEX IF NOT EXISTS idx_listings_item_id ON listings(item_id)",
+    "CREATE INDEX IF NOT EXISTS idx_listings_status   ON listings(status)",
+    "CREATE INDEX IF NOT EXISTS idx_items_created_at  ON items(created_at DESC)",
 ]
+
+
+def get_connection() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    # WAL mode lets readers and writers proceed concurrently — critical so that
+    # a running import (writes) doesn't block the inventory query (reads).
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")   # safe with WAL, much faster
+    return conn
 
 
 def init_db():

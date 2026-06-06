@@ -2,7 +2,8 @@ import threading
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
-    QPushButton, QLabel, QLineEdit, QHeaderView, QAbstractItemView, QComboBox
+    QPushButton, QLabel, QLineEdit, QHeaderView, QAbstractItemView,
+    QComboBox, QProgressBar, QStackedWidget, QFrame
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
@@ -11,7 +12,7 @@ from app.database.models import get_all_items
 from app.utils.qt_thread import post_to_main
 from app.views.item_detail_view import ItemDetailDialog
 
-# Default column widths (user can drag to resize — saved per session by Qt)
+# Default column widths — user can drag to resize
 _COL_WIDTHS = [380, 110, 70, 110, 70, 90, 80]
 
 
@@ -19,15 +20,17 @@ class InventoryView(QWidget):
     def __init__(self):
         super().__init__()
         self._all_items: list[dict] = []
-        self._dirty = False   # False because refresh() is called immediately below
+        self._dirty = False
         self._loading = False
         self._build_ui()
         self.refresh()
 
+    # ── UI construction ───────────────────────────────────────────────────
+
     def _build_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 20, 24, 20)
-        layout.setSpacing(12)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(24, 20, 24, 20)
+        root.setSpacing(12)
 
         # ── Header ────────────────────────────────────────────────────────
         header = QHBoxLayout()
@@ -46,7 +49,7 @@ class InventoryView(QWidget):
         add_btn.setObjectName("primaryButton")
         add_btn.clicked.connect(self._add_item)
         header.addWidget(add_btn)
-        layout.addLayout(header)
+        root.addLayout(header)
 
         # ── Filter bar ────────────────────────────────────────────────────
         fbar = QHBoxLayout()
@@ -62,7 +65,6 @@ class InventoryView(QWidget):
         self.cat_filter.currentTextChanged.connect(self._apply_filter)
         fbar.addWidget(self.cat_filter)
 
-        # Hide Unlisted toggle
         self._hide_unlisted_btn = QPushButton("Hide Unlisted")
         self._hide_unlisted_btn.setCheckable(True)
         self._hide_unlisted_btn.setChecked(False)
@@ -72,16 +74,55 @@ class InventoryView(QWidget):
         fbar.addStretch()
         self.count_label = QLabel("0 items")
         fbar.addWidget(self.count_label)
-        layout.addLayout(fbar)
+        root.addLayout(fbar)
 
-        # ── Table ─────────────────────────────────────────────────────────
+        # ── Stacked area: loading page ↔ table page ───────────────────────
+        self._stack = QStackedWidget()
+        root.addWidget(self._stack, 1)
+
+        # Page 0 — Loading state
+        loading_page = QWidget()
+        lp_layout = QVBoxLayout(loading_page)
+        lp_layout.setAlignment(Qt.AlignCenter)
+        lp_layout.setSpacing(16)
+
+        load_icon = QLabel("📦")
+        load_icon.setAlignment(Qt.AlignCenter)
+        load_icon.setStyleSheet("font-size: 40px;")
+        lp_layout.addWidget(load_icon)
+
+        self._load_title = QLabel("Loading Inventory")
+        self._load_title.setAlignment(Qt.AlignCenter)
+        self._load_title.setStyleSheet(
+            "color: #cdd6f4; font-size: 18px; font-weight: bold;"
+        )
+        lp_layout.addWidget(self._load_title)
+
+        self._load_sub = QLabel("Fetching items from the database…")
+        self._load_sub.setAlignment(Qt.AlignCenter)
+        self._load_sub.setStyleSheet("color: #a6adc8; font-size: 12px;")
+        lp_layout.addWidget(self._load_sub)
+
+        self._load_bar = QProgressBar()
+        self._load_bar.setRange(0, 0)        # indeterminate spinner
+        self._load_bar.setTextVisible(False)
+        self._load_bar.setFixedWidth(320)
+        self._load_bar.setFixedHeight(6)
+        lp_layout.addWidget(self._load_bar, 0, Qt.AlignCenter)
+
+        self._stack.addWidget(loading_page)  # index 0
+
+        # Page 1 — Table
+        table_page = QWidget()
+        tp_layout = QVBoxLayout(table_page)
+        tp_layout.setContentsMargins(0, 0, 0, 0)
+        tp_layout.setSpacing(0)
+
         self.table = QTableWidget()
         self.table.setColumnCount(7)
         self.table.setHorizontalHeaderLabels(
             ["Title", "Platforms", "Bin", "Category", "Cost", "Listed At", "Status"]
         )
-
-        # All columns user-resizable with sensible defaults
         hdr = self.table.horizontalHeader()
         hdr.setSectionResizeMode(QHeaderView.Interactive)
         hdr.setStretchLastSection(False)
@@ -94,16 +135,24 @@ class InventoryView(QWidget):
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
         self.table.doubleClicked.connect(self._open_item)
-        layout.addWidget(self.table)
+        tp_layout.addWidget(self.table)
+
+        self._stack.addWidget(table_page)    # index 1
 
     # ── Data ──────────────────────────────────────────────────────────────
 
     def refresh(self):
-        """Fetch all items on a background thread, then render on the main thread."""
+        """Show loading state, fetch all items on a worker thread, then render."""
         if self._loading:
             return
         self._loading = True
         self._dirty = False
+
+        # Show loading page immediately — user sees feedback right away
+        self._load_title.setText("Loading Inventory")
+        self._load_sub.setText("Fetching items from the database…")
+        self._load_bar.setRange(0, 0)
+        self._stack.setCurrentIndex(0)
 
         def _fetch():
             items = get_all_items()
@@ -112,7 +161,7 @@ class InventoryView(QWidget):
         threading.Thread(target=_fetch, daemon=True).start()
 
     def lazy_refresh(self):
-        """Refresh only when data has been marked dirty since the last load."""
+        """Refresh only when data has been marked dirty since last load."""
         if self._dirty:
             self.refresh()
 
@@ -121,10 +170,17 @@ class InventoryView(QWidget):
         self._dirty = True
 
     def _on_data_loaded(self, items: list[dict]):
+        count = len(items)
+        self._load_sub.setText(f"Rendering {count:,} items…")
+        self._load_bar.setRange(0, 0)
+
         self._loading = False
         self._all_items = items
         self._refresh_category_filter()
-        self._apply_filter()
+        self._apply_filter()   # → _render() — fast thanks to setUpdatesEnabled(False)
+
+        # Switch to table page once render is complete
+        self._stack.setCurrentIndex(1)
 
     def _refresh_category_filter(self):
         cats = sorted({i.get("category", "") for i in self._all_items if i.get("category")})
@@ -139,9 +195,9 @@ class InventoryView(QWidget):
         self.cat_filter.blockSignals(False)
 
     def _apply_filter(self):
-        search   = self.search_box.text().lower()
-        platform = self.plat_filter.currentText()
-        category = self.cat_filter.currentText()
+        search        = self.search_box.text().lower()
+        platform      = self.plat_filter.currentText()
+        category      = self.cat_filter.currentText()
         hide_unlisted = self._hide_unlisted_btn.isChecked()
 
         rows = self._all_items
@@ -157,7 +213,7 @@ class InventoryView(QWidget):
         self._render(rows)
 
     def _render(self, items: list[dict]):
-        # Disable repaints and sorting during fill to avoid O(n²) Qt overhead
+        # Disable repaints + sorting while filling to avoid O(n²) Qt overhead
         self.table.setSortingEnabled(False)
         self.table.setUpdatesEnabled(False)
         self.table.setRowCount(len(items))
@@ -166,13 +222,13 @@ class InventoryView(QWidget):
 
         for row, item in enumerate(items):
             platforms_raw = item.get("platforms") or ""
-            platform_str = " | ".join(p.capitalize() for p in platforms_raw.split(",") if p)
+            platform_str  = " | ".join(p.capitalize() for p in platforms_raw.split(",") if p)
 
             listed_price = item.get("listed_price")
-            price_str = f"${listed_price:.2f}" if listed_price else "—"
+            price_str    = f"${listed_price:.2f}" if listed_price else "—"
 
-            count = item.get("listing_count", 0) or 0
-            status = f"{count} active" if count else "Unlisted"
+            count     = item.get("listing_count", 0) or 0
+            status    = f"{count} active" if count else "Unlisted"
             is_missing = bool(item.get("is_missing", 0))
             title_text = ("❓ " if is_missing else "") + item.get("title", "")
 
