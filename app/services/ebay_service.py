@@ -102,19 +102,16 @@ class EbayService:
         intercepted: list[dict] = []
 
         def _on_response(response):
-            url = response.url
             rtype = response.request.resource_type
-            # Cast a wide net: capture any JSON coming from eBay's servers
-            # (Seller Hub SPA may call /sh/api/..., api.ebay.com, or others)
             if rtype not in ("xhr", "fetch"):
                 return
-            if not any(h in url for h in ("ebay.com/sh/", "api.ebay.com",
-                                           "selling.ebay.com", "ebay.com/mye/")):
-                return
+            # Accept any XHR/fetch JSON response — the eBay Seller Hub SPA can
+            # call many different API hostnames (/sh/api, api.ebay.com, etc.).
+            # _extract_item_list() filters out non-listing responses by content.
             try:
                 data = response.json()
                 if isinstance(data, dict):
-                    intercepted.append({"url": url, "body": data})
+                    intercepted.append({"url": response.url, "body": data})
             except Exception:
                 pass
 

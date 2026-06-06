@@ -12,8 +12,9 @@ from app.database.models import get_all_items
 from app.utils.qt_thread import post_to_main
 from app.views.item_detail_view import ItemDetailDialog
 
-# Default column widths — user can drag to resize
-_COL_WIDTHS = [360, 110, 60, 140, 70, 90, 80]
+# Starting widths for columns 1-6 (Platforms … Status).
+# Column 0 (Title) uses Stretch mode and fills whatever space remains.
+_COL_WIDTHS = [110, 60, 140, 70, 90, 80]
 
 
 class InventoryView(QWidget):
@@ -124,10 +125,11 @@ class InventoryView(QWidget):
             ["Title", "Platforms", "Bin", "Category", "Cost", "Listed At", "Status"]
         )
         hdr = self.table.horizontalHeader()
-        hdr.setSectionResizeMode(QHeaderView.Interactive)
+        hdr.setSectionResizeMode(QHeaderView.Interactive)   # default: all draggable
+        hdr.setSectionResizeMode(0, QHeaderView.Stretch)    # Title fills leftover width
         hdr.setStretchLastSection(False)
         hdr.setMinimumSectionSize(50)
-        for col, w in enumerate(_COL_WIDTHS):
+        for col, w in enumerate(_COL_WIDTHS, start=1):     # cols 1-6 get fixed starts
             self.table.setColumnWidth(col, w)
 
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)

@@ -129,14 +129,17 @@ class MercariService:
         intercepted: list[dict] = []
 
         def _on_response(response):
-            url = response.url
-            if ("api.mercari" in url or "mercari.com/v1/" in url) and (
-                "items" in url or "listings" in url
-            ):
-                try:
-                    intercepted.append(response.json())
-                except Exception:
-                    pass
+            rtype = response.request.resource_type
+            if rtype not in ("xhr", "fetch"):
+                return
+            # Accept any XHR/fetch JSON — Mercari's SPA may call api.mercari.jp,
+            # api.mercari.com, or internal paths. Filter by content, not URL.
+            try:
+                data = response.json()
+                if isinstance(data, (dict, list)):
+                    intercepted.append(data)
+            except Exception:
+                pass
 
         with sync_playwright() as p:
             browser, ctx = headless_context(p, session_file)
@@ -153,70 +156,134 @@ class MercariService:
                 raise ValueError("Mercari session expired — please re-authenticate.")
 
             if progress_cb:
-                progress_cb("Loading Mercari listings…")
+                progress_cb("Loading Mercari active listings…")
 
-            # Mercari fires continuous analytics/ad pings — use "load" so we
-            # don't wait for networkidle (which never arrives), then let the
-            # SPA settle before we start scraping/intercepting XHR.
+            # Mercari fires continuous analytics/ad pings — "load" + explicit
+            # selector wait is more reliable than waiting for networkidle.
             page.goto("https://www.mercari.com/mypage/listings/",
                       wait_until="load", timeout=30_000)
-            page.wait_for_timeout(3_000)
+            try:
+                page.wait_for_selector(
+                    '[data-testid="item-cell"], [class*="ItemCell"], a[href*="/item/"]',
+                    timeout=8_000,
+                )
+            except Exception:
+                pass
+            page.wait_for_timeout(2_000)
             for _ in range(5):
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                page.wait_for_timeout(1_200)
+                page.wait_for_timeout(1_000)
+
+            # Always scrape DOM (XHR alone is unreliable)
+            active_dom = _scrape_dom(page, status="active")
+
+            if progress_cb:
+                progress_cb("Loading Mercari sold listings…")
 
             page.goto("https://www.mercari.com/mypage/listings/?status=sold_out",
                       wait_until="load", timeout=30_000)
-            page.wait_for_timeout(3_000)
+            try:
+                page.wait_for_selector(
+                    '[data-testid="item-cell"], [class*="ItemCell"], a[href*="/item/"]',
+                    timeout=8_000,
+                )
+            except Exception:
+                pass
+            page.wait_for_timeout(2_000)
             for _ in range(3):
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 page.wait_for_timeout(1_000)
 
-            dom_results = _scrape_dom(page) if not intercepted else []
+            sold_dom = _scrape_dom(page, status="sold")
             browser.close()
 
-        return _parse_api_responses(intercepted) if intercepted else dom_results
+        dom_results = active_dom + sold_dom
+        api_results = _parse_api_responses(intercepted)
+        # Prefer API results if they have more data; always fall back to DOM
+        return api_results if len(api_results) >= len(dom_results) else dom_results
 
 
-def _scrape_dom(page) -> list[dict]:
-    items = page.evaluate("""
-        () => Array.from(document.querySelectorAll(
-            '[data-testid="item-cell"], .Item__ItemWrapper, [class*="itemCell"]'
-        )).map(c => {
-            const link  = c.querySelector('a');
-            const img   = c.querySelector('img');
-            const name  = c.querySelector('[class*="name"], [class*="title"]');
-            const price = c.querySelector('[class*="price"]');
-            return {
-                url:     link  ? link.href               : '',
-                title:   name  ? name.textContent.trim() : '',
-                price:   price ? price.textContent.replace(/[^0-9.]/g,'') : '0',
-                img_url: img   ? img.src                 : '',
-            };
-        }).filter(i => i.url && i.title)
+def _scrape_dom(page, status: str = "active") -> list[dict]:
+    """
+    Walk every /item/ link in the page — class-agnostic so it survives
+    Mercari's hashed styled-component class names.
+    """
+    raw = page.evaluate(r"""
+        () => {
+            const seen = new Set();
+            const results = [];
+            for (const link of document.querySelectorAll('a[href*="/item/"]')) {
+                const m = link.href.match(/\/item\/([^/?#]+)/);
+                if (!m) continue;
+                const lid = m[1];
+                if (seen.has(lid) || lid.includes('/')) continue;
+                seen.add(lid);
+
+                const container = link.closest(
+                    '[data-testid], [class*="item"], [class*="Item"], li, article'
+                ) || link;
+                const img   = container.querySelector('img');
+                const price = container.querySelector(
+                    '[class*="price"], [class*="Price"]'
+                );
+                const name  = container.querySelector(
+                    '[class*="name"], [class*="Name"], [class*="title"], [class*="Title"]'
+                );
+                let title = name ? name.textContent.trim() : link.textContent.trim();
+                if (!title) title = 'Untitled';
+
+                results.push({
+                    url:     link.href,
+                    title,
+                    price:   price ? price.textContent.replace(/[^0-9.]/g, '') : '0',
+                    img_url: img   ? img.src : '',
+                });
+            }
+            return results;
+        }
     """)
     results = []
-    for item in items:
+    seen: set[str] = set()
+    for item in (raw or []):
         m = re.search(r"/item/([^/?#]+)", item.get("url", ""))
-        lid = m.group(1) if m else item["url"][-20:]
+        lid = m.group(1) if m else ""
+        if not lid or lid in seen:
+            continue
+        seen.add(lid)
+        try:
+            price_val = float(item.get("price") or 0)
+        except (ValueError, TypeError):
+            price_val = 0.0
         results.append({
             "listing_id": lid,
-            "title":      item["title"],
-            "url":        item["url"],
-            "price":      float(item.get("price") or 0),
-            "status":     "active",
+            "title":      item.get("title", "Untitled"),
+            "url":        item.get("url", ""),
+            "price":      price_val,
+            "status":     status,
             "img_url":    item.get("img_url", ""),
         })
     return results
 
 
-def _parse_api_responses(responses: list[dict]) -> list[dict]:
+def _parse_api_responses(responses: list) -> list[dict]:
     seen, results = set(), []
     for resp in responses:
-        items = (resp.get("items") or resp.get("data", {}).get("items") or
-                 resp.get("result") or [])
-        if isinstance(items, dict):
-            items = items.get("items") or []
+        # Normalise: response may be a bare list or a dict with various item keys
+        if isinstance(resp, list):
+            items = resp
+        elif isinstance(resp, dict):
+            items = (
+                resp.get("items") or
+                resp.get("data", {}).get("items") or
+                resp.get("result") or
+                resp.get("listings") or
+                []
+            )
+            if isinstance(items, dict):
+                items = items.get("items") or []
+        else:
+            continue
+
         for item in items:
             if not isinstance(item, dict):
                 continue
@@ -225,14 +292,21 @@ def _parse_api_responses(responses: list[dict]) -> list[dict]:
                 continue
             seen.add(lid)
             status_raw = str(item.get("status") or "on_sale").lower()
-            status = "sold" if "sold" in status_raw or "trading" in status_raw else "active"
+            status = "sold" if ("sold" in status_raw or "trading" in status_raw) else "active"
+            try:
+                price_val = float(item.get("price") or 0)
+            except (ValueError, TypeError):
+                price_val = 0.0
+            img = ""
+            thumbs = item.get("thumbnails")
+            if isinstance(thumbs, list) and thumbs:
+                img = thumbs[0].get("url", "") if isinstance(thumbs[0], dict) else ""
             results.append({
                 "listing_id": lid,
-                "title":      item.get("name") or "Untitled",
+                "title":      item.get("name") or item.get("title") or "Untitled",
                 "url":        f"https://www.mercari.com/item/{lid}/",
-                "price":      float(item.get("price") or 0),
+                "price":      price_val,
                 "status":     status,
-                "img_url":    (item.get("thumbnails", [{}])[0].get("url", "")
-                               if item.get("thumbnails") else ""),
+                "img_url":    img,
             })
     return results

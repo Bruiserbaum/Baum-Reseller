@@ -227,20 +227,47 @@ def _fetch_with_playwright(url: str) -> list[dict]:
             args=["--no-sandbox", "--disable-dev-shm-usage",
                   "--disable-blink-features=AutomationControlled"],
         )
-        ctx = browser.new_context(user_agent=_UA)
+        ctx = browser.new_context(
+            user_agent=_UA,
+            viewport={"width": 1280, "height": 800},
+            locale="en-US",
+        )
         page = ctx.new_page()
         page.goto(url, wait_until="load", timeout=25_000)
-        # Wait for listing titles to render (eBay lazy-renders the grid)
+        # Wait for listing grid to render (eBay lazy-renders results)
         try:
             page.wait_for_selector(".s-item__title", timeout=8_000)
         except Exception:
-            pass  # proceed anyway — parse whatever we have
-        html = page.content()
+            pass
+
+        # Query the live DOM directly — far more reliable than regex-parsing
+        # the raw HTML, which breaks whenever eBay changes their markup.
+        raw = page.evaluate("""
+            () => Array.from(document.querySelectorAll('.s-item')).map(el => {
+                const titleEl = el.querySelector(
+                    '[role="heading"], .s-item__title span, .s-item__title'
+                );
+                const priceEl = el.querySelector('.s-item__price');
+                const linkEl  = el.querySelector('.s-item__link');
+                return {
+                    title: titleEl ? titleEl.textContent.trim() : '',
+                    price: priceEl ? priceEl.textContent.trim()  : '',
+                    url:   linkEl  ? linkEl.href.split('?')[0]   : '',
+                };
+            }).filter(i =>
+                i.url && i.title && i.title !== 'Shop on eBay' && i.title.length > 5
+            )
+        """)
+
+        # Capture HTML before closing (fallback if DOM eval returns nothing)
+        html = page.content() if not raw else ""
         browser.close()
-    listings = _parse_ebay_html(html)
-    if not listings:
-        raise RuntimeError("No listings parsed from Playwright page")
-    return listings
+
+    if raw:
+        return [{"title": i["title"], "price": i["price"], "url": i["url"]}
+                for i in raw]
+    # Last-chance: regex parse the captured HTML
+    return _parse_ebay_html(html)
 
 
 def _parse_ebay_html(html: str) -> list[dict]:
