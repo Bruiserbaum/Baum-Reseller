@@ -208,7 +208,9 @@ class InventoryView(QWidget):
         if category != "All":
             rows = [i for i in rows if i.get("category", "") == category]
         if hide_unlisted:
-            rows = [i for i in rows if (i.get("listing_count") or 0) > 0]
+            # Hide only items with no listings at all — keep active AND sold items
+            rows = [i for i in rows
+                    if (i.get("listing_count") or 0) + (i.get("sold_count") or 0) > 0]
 
         self._render(rows)
 
@@ -227,8 +229,14 @@ class InventoryView(QWidget):
             listed_price = item.get("listed_price")
             price_str    = f"${listed_price:.2f}" if listed_price else "—"
 
-            count     = item.get("listing_count", 0) or 0
-            status    = f"{count} active" if count else "Unlisted"
+            active_count = item.get("listing_count", 0) or 0
+            sold_count   = item.get("sold_count", 0) or 0
+            if active_count:
+                status = f"{active_count} active"
+            elif sold_count:
+                status = f"Sold ({sold_count})"
+            else:
+                status = "Unlisted"
             is_missing = bool(item.get("is_missing", 0))
             title_text = ("❓ " if is_missing else "") + item.get("title", "")
 

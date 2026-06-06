@@ -8,11 +8,16 @@ def get_all_items() -> list[dict]:
     with get_connection() as conn:
         rows = conn.execute("""
             SELECT i.*,
-                   GROUP_CONCAT(DISTINCT l.platform) AS platforms,
-                   COUNT(DISTINCT l.id) AS listing_count,
-                   MAX(l.listing_price) AS listed_price
+                   -- platforms: show ALL platforms that have ANY listing (active or sold)
+                   (SELECT GROUP_CONCAT(DISTINCT l2.platform)
+                    FROM listings l2 WHERE l2.item_id = i.id) AS platforms,
+                   -- listing_count: only active listings (drives "X active" badge)
+                   COUNT(DISTINCT CASE WHEN l.status = 'active' THEN l.id END) AS listing_count,
+                   -- sold_count: sold listings (so we can display "Sold" instead of "Unlisted")
+                   COUNT(DISTINCT CASE WHEN l.status = 'sold'   THEN l.id END) AS sold_count,
+                   MAX(CASE WHEN l.status = 'active' THEN l.listing_price END) AS listed_price
             FROM items i
-            LEFT JOIN listings l ON l.item_id = i.id AND l.status = 'active'
+            LEFT JOIN listings l ON l.item_id = i.id
             GROUP BY i.id
             ORDER BY i.created_at DESC
         """).fetchall()
