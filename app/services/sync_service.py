@@ -79,11 +79,18 @@ def sync_all(progress_cb=None, done_cb=None):
 
 
 def _persist_listings(platform: str, listings: list[dict]):
-    from app.database.models import upsert_listing, save_item
+    from app.database.models import (
+        upsert_listing, save_item,
+        get_item_id_for_listing, upsert_image_url,
+    )
     for l in listings:
-        item_id = l.get("item_id")
+        # Look up an existing item via the listings table before creating a new one.
+        # Without this, every sync run would create duplicate items because the
+        # scrapers don't carry a DB item_id.
+        item_id = get_item_id_for_listing(platform, l["listing_id"])
         if not item_id:
             item_id = save_item({"title": l.get("title", "Untitled")})
+
         upsert_listing({
             "item_id": item_id,
             "platform": platform,
@@ -95,3 +102,8 @@ def _persist_listings(platform: str, listings: list[dict]):
             "sold_date": l.get("sold_date", ""),
             "sold_price": l.get("sold_price", l.get("price", 0) if l.get("status") == "sold" else 0),
         })
+
+        # Persist the thumbnail URL returned by the scraper (if any).
+        img_url = l.get("img_url", "")
+        if img_url:
+            upsert_image_url(item_id, img_url)

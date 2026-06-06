@@ -1,3 +1,8 @@
+import os
+import threading
+import hashlib
+import urllib.request
+
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit,
     QTextEdit, QDoubleSpinBox, QLabel, QPushButton, QScrollArea,
@@ -9,6 +14,9 @@ from PySide6.QtGui import QPixmap
 
 from app.database.models import get_item, save_item, delete_item
 from app.utils.auto_save import AutoSave
+from app.utils.qt_thread import post_to_main
+
+_IMAGE_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".baum-reseller", "image_cache")
 
 PLATFORMS = ["ebay", "mercari", "poshmark"]
 PLATFORM_LABELS = {"ebay": "eBay", "mercari": "Mercari", "poshmark": "Poshmark"}
@@ -82,6 +90,14 @@ class ItemDetailDialog(QDialog):
         self.category_edit.setPlaceholderText("e.g. Clothing, Electronics")
         self.category_edit.textChanged.connect(self._on_change)
         core_form.addRow("Category", self.category_edit)
+
+        sync_note = QLabel(
+            "Tip: Description and Category are not captured during platform sync — "
+            "fill them in here, or pre-populate via the Import CSV."
+        )
+        sync_note.setWordWrap(True)
+        sync_note.setStyleSheet("color: #585b70; font-size: 10px; font-style: italic;")
+        core_form.addRow("", sync_note)
 
         self.bin_edit = QLineEdit()
         self.bin_edit.setPlaceholderText("e.g. A3, Shelf 2")
@@ -163,17 +179,61 @@ class ItemDetailDialog(QDialog):
         self.notes_edit.setPlainText(self._item.get("notes", ""))
 
         for img in self._item.get("images", []):
-            self.img_list.addItem(img.get("local_path", ""))
+            local = img.get("local_path", "")
+            url   = img.get("source_url", "")
+            label = local or url or "(no path)"
+            lw_item = QListWidgetItem(label)
+            lw_item.setData(Qt.UserRole, url)   # store URL for fallback download
+            self.img_list.addItem(lw_item)
         if self.img_list.count():
             self.img_list.setCurrentRow(0)
 
     def _preview_image(self, row: int):
         if row < 0:
             return
-        path = self.img_list.item(row).text()
-        if path and __import__("os").path.exists(path):
+        lw_item = self.img_list.item(row)
+        local_path = lw_item.text()
+        source_url = lw_item.data(Qt.UserRole) or ""
+
+        # Prefer local file if it exists
+        if local_path and os.path.exists(local_path):
+            pix = QPixmap(local_path).scaled(240, 240, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.img_label.setPixmap(pix)
+            return
+
+        # Fall back to downloading the remote URL (cached locally)
+        if source_url:
+            self.img_label.setText("Loading image…")
+            threading.Thread(
+                target=self._fetch_remote_image,
+                args=(source_url,),
+                daemon=True,
+            ).start()
+        else:
+            self.img_label.setText("No image")
+
+    def _fetch_remote_image(self, url: str):
+        """Download a remote image URL to a local cache dir, then display it."""
+        try:
+            os.makedirs(_IMAGE_CACHE_DIR, exist_ok=True)
+            fname = hashlib.md5(url.encode()).hexdigest() + ".jpg"
+            cache_path = os.path.join(_IMAGE_CACHE_DIR, fname)
+            if not os.path.exists(cache_path):
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = resp.read()
+                with open(cache_path, "wb") as f:
+                    f.write(data)
+            post_to_main(lambda p=cache_path: self._show_cached_image(p))
+        except Exception:
+            post_to_main(lambda: self.img_label.setText("Image unavailable"))
+
+    def _show_cached_image(self, path: str):
+        if os.path.exists(path):
             pix = QPixmap(path).scaled(240, 240, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             self.img_label.setPixmap(pix)
+        else:
+            self.img_label.setText("No image")
 
     # ── Auto-save ─────────────────────────────────────────────────────────
 

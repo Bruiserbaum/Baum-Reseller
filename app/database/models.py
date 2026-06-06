@@ -94,11 +94,36 @@ def save_image(data: dict) -> int:
         return cur.lastrowid
 
 
+def upsert_image_url(item_id: int, source_url: str):
+    """Record a remote image URL for an item if it isn't already stored."""
+    with get_connection() as conn:
+        exists = conn.execute(
+            "SELECT id FROM images WHERE item_id=? AND source_url=?",
+            (item_id, source_url)
+        ).fetchone()
+        if not exists:
+            conn.execute(
+                "INSERT INTO images (item_id, local_path, image_hash, source_url, is_primary)"
+                " VALUES (?, '', '', ?, 0)",
+                (item_id, source_url)
+            )
+
+
 def get_items_by_hash(image_hash: str) -> list[dict]:
     with get_connection() as conn:
         return [dict(r) for r in conn.execute(
             "SELECT DISTINCT item_id FROM images WHERE image_hash = ?", (image_hash,)
         ).fetchall()]
+
+
+def get_item_id_for_listing(platform: str, listing_id: str) -> Optional[int]:
+    """Return the item_id already associated with this platform listing, or None."""
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT item_id FROM listings WHERE platform=? AND listing_id=?",
+            (platform, listing_id)
+        ).fetchone()
+        return row["item_id"] if row else None
 
 
 # ── Sales ──────────────────────────────────────────────────────────────────
