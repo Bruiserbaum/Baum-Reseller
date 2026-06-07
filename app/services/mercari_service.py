@@ -137,7 +137,7 @@ class MercariService:
             try:
                 data = response.json()
                 if isinstance(data, (dict, list)):
-                    intercepted.append(data)
+                    intercepted.append({"url": response.url, "body": data})
             except Exception:
                 pass
 
@@ -162,6 +162,15 @@ class MercariService:
             # selector wait is more reliable than waiting for networkidle.
             page.goto("https://www.mercari.com/mypage/listings/",
                       wait_until="load", timeout=30_000)
+
+            # Detect soft-redirect to auth (some expired sessions don't hard-redirect)
+            if any(a in page.url for a in _AUTH):
+                browser.close()
+                self.clear_session()
+                raise ValueError(
+                    "Mercari session expired — go to Settings → Mercari → Login (Browser)."
+                )
+
             try:
                 page.wait_for_selector(
                     '[data-testid="item-cell"], [class*="ItemCell"], a[href*="/item/"]',
@@ -207,6 +216,10 @@ class MercariService:
             "timestamp":              _dt.datetime.now().isoformat(),
             "platform":               "mercari",
             "xhr_responses_captured": len(intercepted),
+            "xhr_urls":               [r.get("url", "") for r in intercepted[:20]],
+            "xhr_body_top_keys":      [list(r.get("body", {}).keys())[:6]
+                                       if isinstance(r.get("body"), dict) else []
+                                       for r in intercepted[:10]],
             "xhr_items_parsed":       len(api_results),
             "dom_active_items":       len(active_dom),
             "dom_sold_items":         len(sold_dom),
@@ -289,7 +302,13 @@ def _scrape_dom(page, status: str = "active") -> list[dict]:
 
 def _parse_api_responses(responses: list) -> list[dict]:
     seen, results = set(), []
-    for resp in responses:
+    for entry in responses:
+        # Each entry is now {"url": ..., "body": ...}; unwrap the body
+        if isinstance(entry, dict) and "body" in entry:
+            resp = entry["body"]
+        else:
+            resp = entry  # legacy bare format
+
         # Normalise: response may be a bare list or a dict with various item keys
         if isinstance(resp, list):
             items = resp

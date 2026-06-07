@@ -182,7 +182,7 @@ class EbayService:
                         "Go to Settings → eBay → Login (Browser) to refresh your session."
                     )
 
-            # Wait for listing links to appear
+            # Wait for first listing links to appear before paginating
             try:
                 page.wait_for_selector(
                     'a[href*="/itm/"], '
@@ -197,11 +197,10 @@ class EbayService:
             if progress_cb:
                 progress_cb("Loading eBay active listings…")
 
-            for _ in range(6):
-                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                page.wait_for_timeout(800)
-
-            active_dom = _scrape_seller_hub(page, status="active")
+            # Paginate through all active pages (up to 20 pages × 25-100/page)
+            active_dom = _paginate_and_scrape(
+                page, status="active", progress_cb=progress_cb, label="active"
+            )
 
             if progress_cb:
                 progress_cb("Loading eBay sold listings…")
@@ -225,11 +224,10 @@ class EbayService:
                 pass
             page.wait_for_timeout(2_000)
 
-            for _ in range(4):
-                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                page.wait_for_timeout(800)
-
-            sold_dom = _scrape_seller_hub(page, status="sold")
+            # Paginate sold pages too (fewer — typically 1-3 pages)
+            sold_dom = _paginate_and_scrape(
+                page, status="sold", progress_cb=progress_cb, label="sold", max_pages=10
+            )
             browser.close()
 
         dom_results = active_dom + sold_dom
@@ -262,6 +260,100 @@ class EbayService:
             pass
 
         return result
+
+
+_BUY_IT_NOW_RE = re.compile(
+    r'[\s·•\-]*Buy\s+It\s+Now[\s·•\-]*\d*\s*$', re.IGNORECASE
+)
+_ITEM_ID_SUFFIX_RE = re.compile(r'[\s·•]+\d{10,}\s*$')
+
+
+def _clean_title(title: str) -> str:
+    """Strip eBay-injected text (Buy It Now · NNNNN) from DOM link text."""
+    title = _BUY_IT_NOW_RE.sub('', title)
+    title = _ITEM_ID_SUFFIX_RE.sub('', title)
+    title = title.strip(' ·•-')
+    return title or 'Untitled'
+
+
+def _try_next_page(page) -> bool:
+    """
+    Click the Next-page control on eBay Seller Hub or My eBay Active.
+    Returns True if a button was found and clicked, False otherwise.
+    """
+    return bool(page.evaluate("""
+        () => {
+            const candidates = [
+                '[aria-label="Go to next page"]',
+                '[aria-label="Next page"]',
+                'button[title="Next page"]',
+                'button[title="Next"]',
+                'a[aria-label="Next"]',
+                '.pag-next:not(.pag-next--disabled)',
+                '[class*="pagination-next"]:not([disabled]):not([aria-disabled="true"])',
+                '[class*="next-page"]:not([disabled]):not([aria-disabled="true"])',
+            ];
+            for (const sel of candidates) {
+                const el = document.querySelector(sel);
+                if (el && !el.disabled && el.getAttribute('aria-disabled') !== 'true'
+                        && !el.closest('[disabled]')) {
+                    el.click();
+                    return true;
+                }
+            }
+            // Last resort: any pagination button whose visible text is ">" or "›"
+            for (const el of document.querySelectorAll(
+                '[class*="pagination"] button, [class*="pagination"] a, [class*="paging"] button'
+            )) {
+                const t = el.textContent.trim();
+                if ((t === '>' || t === '›' || t === '»') && !el.disabled
+                        && el.getAttribute('aria-disabled') !== 'true') {
+                    el.click();
+                    return true;
+                }
+            }
+            return false;
+        }
+    """))
+
+
+def _paginate_and_scrape(page, status: str, progress_cb=None,
+                          label: str = "active", max_pages: int = 20) -> list[dict]:
+    """
+    Scrape the current page then keep clicking Next until there are no more pages
+    or max_pages is reached.  Returns all unique listings.
+    """
+    all_results: list[dict] = []
+    seen_ids: set[str] = set()
+
+    for pg_num in range(max_pages):
+        if progress_cb and pg_num > 0:
+            progress_cb(f"Loading eBay {label} listings… (page {pg_num + 1})")
+
+        # Scroll to ensure lazy-loaded rows are rendered
+        for _ in range(3):
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            page.wait_for_timeout(600)
+
+        items = _scrape_seller_hub(page, status=status)
+        new_items = [i for i in items if i["listing_id"] not in seen_ids]
+        if new_items:
+            seen_ids.update(i["listing_id"] for i in new_items)
+            all_results.extend(new_items)
+        elif pg_num > 0:
+            break  # No new items on this page — we've reached the end
+
+        if not _try_next_page(page):
+            break  # No Next button visible
+
+        # Wait for the next page to finish loading
+        try:
+            page.wait_for_load_state("networkidle", timeout=12_000)
+        except Exception:
+            pass
+        page.wait_for_timeout(1_500)
+
+    return all_results
 
 
 def _scrape_seller_hub(page, status: str = "active") -> list[dict]:
@@ -326,7 +418,7 @@ def _scrape_seller_hub(page, status: str = "active") -> list[dict]:
             price_val = 0.0
         results.append({
             "listing_id": lid,
-            "title":      item.get("title", "Untitled"),
+            "title":      _clean_title(item.get("title", "")),
             "url":        item.get("url", ""),
             "price":      price_val,
             "status":     status,
