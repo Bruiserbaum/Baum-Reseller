@@ -268,3 +268,59 @@ def start_idle_enrichment():
             return
         _running = True
     threading.Thread(target=_idle_loop, daemon=True).start()
+
+
+def bulk_enrich_async(mode: str = "all", progress_cb=None, done_cb=None) -> None:
+    """
+    Enrich items in bulk on a background thread.
+
+    mode:
+      'images'       — only items with no images at all (local or remote)
+      'descriptions' — only items missing a description
+      'all'          — either of the above (default)
+
+    progress_cb(current: int, total: int) is called after each item (background thread).
+    done_cb(count_updated: int) is called when the pass is complete (background thread).
+    """
+    def _worker():
+        from app.database.connection import get_connection
+
+        _no_img = """
+            NOT EXISTS (
+                SELECT 1 FROM images img WHERE img.item_id = i.id
+                AND (img.local_path != '' OR
+                     (img.source_url IS NOT NULL AND img.source_url != ''))
+            )"""
+        _no_desc = "(i.description IS NULL OR i.description = '')"
+
+        if mode == "images":
+            cond = _no_img
+        elif mode == "descriptions":
+            cond = _no_desc
+        else:
+            cond = f"({_no_img} OR {_no_desc})"
+
+        with get_connection() as conn:
+            ids = [r["id"] for r in conn.execute(f"""
+                SELECT DISTINCT i.id
+                FROM items i
+                JOIN listings l ON l.item_id = i.id AND l.url != ''
+                WHERE {cond}
+                ORDER BY i.created_at DESC
+            """).fetchall()]
+
+        total = len(ids)
+        updated = 0
+        for current, item_id in enumerate(ids, 1):
+            try:
+                if _do_enrich(item_id):
+                    updated += 1
+            except Exception:
+                pass
+            if progress_cb:
+                progress_cb(current, total)
+
+        if done_cb:
+            done_cb(updated)
+
+    threading.Thread(target=_worker, daemon=True).start()

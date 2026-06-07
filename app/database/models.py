@@ -313,7 +313,10 @@ def get_backfill_stats() -> dict:
     with get_connection() as conn:
         total = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
         with_images = conn.execute(
-            "SELECT COUNT(DISTINCT item_id) FROM images WHERE local_path != '' AND local_path IS NOT NULL"
+            # Count items with at least one image — local file OR remote URL
+            "SELECT COUNT(DISTINCT item_id) FROM images "
+            "WHERE (local_path IS NOT NULL AND local_path != '') "
+            "   OR (source_url  IS NOT NULL AND source_url  != '')"
         ).fetchone()[0]
         with_desc = conn.execute(
             "SELECT COUNT(*) FROM items WHERE description IS NOT NULL AND description != ''"

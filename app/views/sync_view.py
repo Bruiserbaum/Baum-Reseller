@@ -296,10 +296,18 @@ class SyncView(QWidget):
 
         # ── Images row ───────────────────────────────────────────────────
         img_hb, self._bg_img_stat, self._bg_img_time = _row("🖼", "Images")
+        self._bg_img_btn = QPushButton("Run Now")
+        self._bg_img_btn.setFixedWidth(90)
+        self._bg_img_btn.clicked.connect(self._run_enrich_images)
+        img_hb.addWidget(self._bg_img_btn)
         gl.addLayout(img_hb)
 
         # ── Descriptions row ─────────────────────────────────────────────
         desc_hb, self._bg_desc_stat, self._bg_desc_time = _row("📝", "Descriptions")
+        self._bg_desc_btn = QPushButton("Run Now")
+        self._bg_desc_btn.setFixedWidth(90)
+        self._bg_desc_btn.clicked.connect(self._run_enrich_descriptions)
+        desc_hb.addWidget(self._bg_desc_btn)
         gl.addLayout(desc_hb)
 
         # ── Duplicate Scan row ───────────────────────────────────────────
@@ -366,6 +374,52 @@ class SyncView(QWidget):
                 post_to_main(lambda: self._bg_img_stat.setText(f"Error: {exc}"))
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _run_enrich_images(self):
+        """Trigger bulk image enrichment for items that have no images yet."""
+        self._bg_img_btn.setEnabled(False)
+        self._bg_img_btn.setText("Running…")
+        self._bg_img_stat.setText("Finding items without images…")
+
+        from app.services.enrich_service import bulk_enrich_async
+
+        def _progress(current: int, total: int):
+            post_to_main(lambda c=current, t=total:
+                self._bg_img_stat.setText(f"⟳  Enriching images: {c} / {t} items…"))
+
+        def _done(updated: int):
+            def _ui():
+                self._bg_img_btn.setEnabled(True)
+                self._bg_img_btn.setText("Run Now")
+                self._refresh_background_status()
+                if updated:
+                    self._bg_img_time.setText(f"Just ran — {updated} item(s) updated")
+            post_to_main(_ui)
+
+        bulk_enrich_async(mode="images", progress_cb=_progress, done_cb=_done)
+
+    def _run_enrich_descriptions(self):
+        """Trigger bulk description enrichment for items missing descriptions."""
+        self._bg_desc_btn.setEnabled(False)
+        self._bg_desc_btn.setText("Running…")
+        self._bg_desc_stat.setText("Finding items without descriptions…")
+
+        from app.services.enrich_service import bulk_enrich_async
+
+        def _progress(current: int, total: int):
+            post_to_main(lambda c=current, t=total:
+                self._bg_desc_stat.setText(f"⟳  Enriching descriptions: {c} / {t} items…"))
+
+        def _done(updated: int):
+            def _ui():
+                self._bg_desc_btn.setEnabled(True)
+                self._bg_desc_btn.setText("Run Now")
+                self._refresh_background_status()
+                if updated:
+                    self._bg_desc_time.setText(f"Just ran — {updated} item(s) updated")
+            post_to_main(_ui)
+
+        bulk_enrich_async(mode="descriptions", progress_cb=_progress, done_cb=_done)
 
     def _run_dedup_scan(self):
         """Trigger a manual duplicate scan and refresh the status afterwards."""
