@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QGroupBox, QScrollArea, QMessageBox,
     QComboBox, QProgressBar, QFileDialog, QLineEdit,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from app.utils.qt_thread import post_to_main
 
 from app.database.models import get_setting, set_setting
@@ -15,6 +15,9 @@ from version import VERSION
 
 
 class SettingsView(QWidget):
+    # Emitted after a successful local import so the main window can refresh all views
+    data_imported = Signal()
+
     def __init__(self):
         super().__init__()
         self._build_ui()
@@ -142,6 +145,15 @@ class SettingsView(QWidget):
         connect_drive_btn.clicked.connect(self._connect_gdrive)
         gdrive_row.addWidget(connect_drive_btn)
         backup_layout.addLayout(gdrive_row)
+
+        gdrive_hint = QLabel(
+            "Requires a free Google Cloud OAuth2 credentials file. "
+            "Click <b>Connect</b> for step-by-step instructions."
+        )
+        gdrive_hint.setTextFormat(Qt.RichText)
+        gdrive_hint.setWordWrap(True)
+        gdrive_hint.setStyleSheet("color: #6c7086; font-size: 10px; margin-bottom: 4px;")
+        backup_layout.addWidget(gdrive_hint)
 
         bk_row = QHBoxLayout()
         self.last_backup_label = QLabel("Last backup: Never")
@@ -354,13 +366,16 @@ class SettingsView(QWidget):
 
         def _done(ok, err):
             if ok:
+                # Use a non-blocking status update — NOT a QMessageBox.
+                # A modal dialog would block the main thread while the background
+                # worker calls os._exit(0), causing the dialog to vanish mid-read.
+                # The process exits ~1 s after this label appears; the installer
+                # then installs and relaunches the app automatically.
                 post_to_main(lambda: (
                     self.update_progress.hide(),
-                    QMessageBox.information(
-                        self, "Update",
-                        "The installer is running in the background.\n"
-                        "The app will close and reopen when the update finishes."
-                    )
+                    self.update_status.setText(
+                        "✓ Installer started — app will close and reopen with the new version…"
+                    ),
                 ))
             else:
                 post_to_main(lambda: (
@@ -378,13 +393,65 @@ class SettingsView(QWidget):
     # ── Backup ────────────────────────────────────────────────────────────
 
     def _connect_gdrive(self):
+        import json as _json, shutil
+        from app.services.backup_service import GDRIVE_CREDS_PATH, get_drive_service
+
+        # ── Step 1: ensure the OAuth2 credentials file is present ────────
+        if not os.path.exists(GDRIVE_CREDS_PATH):
+            reply = QMessageBox.information(
+                self,
+                "Google Drive Setup",
+                "To connect Google Drive you need an OAuth2 credentials file "
+                "from <b>Google Cloud Console</b>.<br><br>"
+                "<b>How to get it:</b><ol>"
+                "<li>Go to <tt>console.cloud.google.com</tt> → APIs &amp; Services → Credentials</li>"
+                "<li>Click <b>Create Credentials</b> → OAuth 2.0 Client ID</li>"
+                "<li>Application type: <b>Desktop app</b></li>"
+                "<li>Click <b>Download JSON</b></li></ol>"
+                "Then click <b>OK</b> to browse for that downloaded JSON file.",
+                QMessageBox.Ok | QMessageBox.Cancel,
+            )
+            if reply != QMessageBox.Ok:
+                return
+
+            src, _ = QFileDialog.getOpenFileName(
+                self,
+                "Select Google OAuth2 Credentials JSON",
+                os.path.expanduser("~"),
+                "JSON Files (*.json)",
+            )
+            if not src:
+                return
+
+            # Validate it looks like a real Google OAuth credentials file
+            try:
+                with open(src, "r", encoding="utf-8") as fh:
+                    cred_data = _json.load(fh)
+                if "installed" not in cred_data and "web" not in cred_data:
+                    QMessageBox.warning(
+                        self,
+                        "Invalid File",
+                        "This doesn't look like a Google OAuth2 credentials file.\n\n"
+                        "The JSON must have an 'installed' or 'web' key at the top level.\n"
+                        "Please download the correct file from Google Cloud Console → Credentials.",
+                    )
+                    return
+            except Exception as exc:
+                QMessageBox.critical(self, "Invalid File",
+                                     f"Could not read the JSON file:\n{exc}")
+                return
+
+            os.makedirs(os.path.dirname(GDRIVE_CREDS_PATH), exist_ok=True)
+            shutil.copy2(src, GDRIVE_CREDS_PATH)
+
+        # ── Step 2: run the OAuth browser flow ────────────────────────────
         try:
-            from app.services.backup_service import get_drive_service
             get_drive_service()
-            self.gdrive_status.setText("Google Drive: Connected")
-            QMessageBox.information(self, "Google Drive", "Connected successfully.")
-        except Exception as e:
-            QMessageBox.critical(self, "Google Drive", f"Connection failed:\n{e}")
+            self.gdrive_status.setText("Google Drive: Connected ✓")
+            QMessageBox.information(self, "Google Drive", "Connected successfully!")
+        except Exception as exc:
+            QMessageBox.critical(self, "Google Drive",
+                                 f"Connection failed:\n{exc}")
 
     def _backup_now(self):
         self.backup_status.setText("Creating backup…")
@@ -438,6 +505,15 @@ class SettingsView(QWidget):
         try:
             from app.services.backup_service import import_from_zip
             import_from_zip(path)
-            QMessageBox.information(self, "Import", "Data restored successfully.")
+            self.data_imported.emit()   # tell main window to reload all views
+            QMessageBox.information(
+                self, "Import Complete",
+                "✓ Data restored successfully — all views have been refreshed.\n\n"
+                "Note: The following are NOT included in backups and must be\n"
+                "re-entered on a new machine:\n"
+                "  • Anthropic API key (Settings → Trending & AI Insights)\n"
+                "  • Google Drive credentials (Settings → Connect Google Drive)\n"
+                "  • Platform logins (Sync tab → Login)"
+            )
         except Exception as e:
             QMessageBox.critical(self, "Import Failed", str(e))

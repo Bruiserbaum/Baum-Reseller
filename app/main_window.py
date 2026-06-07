@@ -110,6 +110,9 @@ class MainWindow(QMainWindow):
         self.import_view.import_completed.connect(self.containers_view.mark_dirty)
         self.import_view.import_completed.connect(self._on_import_done)
 
+        # Backup restore → reload all live views
+        self.settings_view.data_imported.connect(self._on_backup_imported)
+
         # Trending view signals completion via optional attribute
         if hasattr(self.trending_view, "trending_updated"):
             self.trending_view.trending_updated.connect(self._on_trending_done)
@@ -237,6 +240,17 @@ class MainWindow(QMainWindow):
 
     def _on_import_done(self):
         self.status_bar.showMessage("✓  Import complete", 8_000)
+
+    def _on_backup_imported(self):
+        """Refresh all views after a backup restore from Settings."""
+        self.inventory_view.mark_dirty()
+        self.inventory_view.lazy_refresh()
+        self.containers_view.mark_dirty()
+        self.containers_view.lazy_refresh()
+        self.reports_view.refresh()
+        self.notifications_view.refresh()
+        self._refresh_status()
+        self.status_bar.showMessage("✓  Backup restored — all views refreshed", 10_000)
 
     def _on_trending_done(self):
         self.status_bar.showMessage("✓  Trending data updated", 8_000)

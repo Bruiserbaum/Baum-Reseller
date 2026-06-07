@@ -12,7 +12,9 @@ from app.database.connection import DB_PATH, get_connection
 from app.database.models import get_setting, set_setting
 
 BACKUP_FILENAME = "baum_reseller_backup.zip"
-IMAGES_DIR = os.path.join(os.path.expanduser("~"), ".baum-reseller", "images")
+_BAUM_DIR  = os.path.join(os.path.expanduser("~"), ".baum-reseller")
+IMAGES_DIR = os.path.join(_BAUM_DIR, "images")
+_CONFIG_PATH = os.path.join(_BAUM_DIR, "config.json")
 
 
 # ── Local export / import ─────────────────────────────────────────────────
@@ -21,12 +23,18 @@ def export_to_zip(dest_path: str) -> str:
     """Export entire database + images to a zip archive."""
     data = {}
     with get_connection() as conn:
-        for table in ("items", "listings", "images", "sales", "settings"):
+        for table in ("items", "listings", "images", "sales", "settings", "notifications"):
             rows = conn.execute(f"SELECT * FROM {table}").fetchall()
             data[table] = [dict(r) for r in rows]
 
     with zipfile.ZipFile(dest_path, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("db_export.json", json.dumps(data, indent=2))
+
+        # Include app config (Poshmark email, etc.)
+        if os.path.isfile(_CONFIG_PATH):
+            zf.write(_CONFIG_PATH, "config.json")
+
+        # Include any locally-cached images
         if os.path.isdir(IMAGES_DIR):
             for root, _, files in os.walk(IMAGES_DIR):
                 for fname in files:
@@ -39,34 +47,72 @@ def export_to_zip(dest_path: str) -> str:
 def import_from_zip(src_path: str):
     """Restore database and images from a zip archive."""
     with zipfile.ZipFile(src_path, "r") as zf:
+        names = zf.namelist()
         data = json.loads(zf.read("db_export.json"))
-        zf.extractall(os.path.dirname(IMAGES_DIR))
+
+        # Extract everything except db_export.json to the .baum-reseller dir
+        for name in names:
+            if name == "db_export.json":
+                continue
+            dest = os.path.join(_BAUM_DIR, name)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            with zf.open(name) as src, open(dest, "wb") as dst:
+                dst.write(src.read())
+
+    def _insert(conn, table: str, rows: list):
+        for row in rows:
+            cols = ", ".join(row.keys())
+            placeholders = ", ".join("?" * len(row))
+            conn.execute(
+                f"INSERT OR REPLACE INTO {table} ({cols}) VALUES ({placeholders})",
+                list(row.values()),
+            )
 
     with get_connection() as conn:
-        for table in ("sales", "images", "listings", "items", "settings"):
+        # Delete in dependency order: child rows first, then parents.
+        # notifications + sales + images + listings reference items,
+        # so items must be cleared last.
+        for table in ("notifications", "sales", "images", "listings", "items", "settings"):
             conn.execute(f"DELETE FROM {table}")
-        for row in data.get("items", []):
-            cols = ", ".join(row.keys())
-            placeholders = ", ".join("?" * len(row))
-            conn.execute(f"INSERT OR REPLACE INTO items ({cols}) VALUES ({placeholders})", list(row.values()))
-        for row in data.get("listings", []):
-            cols = ", ".join(row.keys())
-            placeholders = ", ".join("?" * len(row))
-            conn.execute(f"INSERT OR REPLACE INTO listings ({cols}) VALUES ({placeholders})", list(row.values()))
-        for row in data.get("images", []):
-            cols = ", ".join(row.keys())
-            placeholders = ", ".join("?" * len(row))
-            conn.execute(f"INSERT OR REPLACE INTO images ({cols}) VALUES ({placeholders})", list(row.values()))
-        for row in data.get("sales", []):
-            cols = ", ".join(row.keys())
-            placeholders = ", ".join("?" * len(row))
-            conn.execute(f"INSERT OR REPLACE INTO sales ({cols}) VALUES ({placeholders})", list(row.values()))
+
+        _insert(conn, "items",    data.get("items",    []))
+        _insert(conn, "listings", data.get("listings", []))
+        _insert(conn, "images",   data.get("images",   []))
+        _insert(conn, "sales",    data.get("sales",    []))
+        # notifications may be absent in backups made before v1.5.10
+        _insert(conn, "notifications", data.get("notifications", []))
         for row in data.get("settings", []):
             conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
                          (row["key"], row["value"]))
 
+        # Fix absolute image paths that came from a different machine / username.
+        # Images are extracted to IMAGES_DIR; the stored local_path might reference
+        # a different home directory (e.g. C:\Users\OldUser\...).  Re-anchor any
+        # path that no longer exists by reconstructing it from IMAGES_DIR.
+        rows = conn.execute(
+            "SELECT id, local_path FROM images WHERE local_path != '' AND local_path IS NOT NULL"
+        ).fetchall()
+        for img_id, lp in rows:
+            if lp and not os.path.exists(lp):
+                # Extract the portion after the last 'images' directory segment
+                norm = lp.replace("\\", "/")
+                marker = "/images/"
+                idx = norm.rfind(marker)
+                if idx != -1:
+                    rel = norm[idx + len(marker):]   # e.g. "123/photo.jpg"
+                    new_path = os.path.join(IMAGES_DIR, *rel.split("/"))
+                    if os.path.exists(new_path):
+                        conn.execute(
+                            "UPDATE images SET local_path = ? WHERE id = ?",
+                            (new_path, img_id),
+                        )
+
 
 # ── Google Drive ───────────────────────────────────────────────────────────
+
+GDRIVE_CREDS_PATH = os.path.join(os.path.expanduser("~"), ".baum-reseller", "gdrive_creds.json")
+GDRIVE_TOKEN_PATH = os.path.join(os.path.expanduser("~"), ".baum-reseller", "gdrive_token.pkl")
+
 
 def get_drive_service():
     """Return an authenticated Google Drive service or raise if not configured."""
@@ -76,20 +122,30 @@ def get_drive_service():
     from googleapiclient.discovery import build
 
     SCOPES = ["https://www.googleapis.com/auth/drive.file"]
-    creds_path = os.path.join(os.path.expanduser("~"), ".baum-reseller", "gdrive_creds.json")
-    token_path = os.path.join(os.path.expanduser("~"), ".baum-reseller", "gdrive_token.pkl")
+
+    if not os.path.exists(GDRIVE_CREDS_PATH):
+        raise FileNotFoundError(
+            "Google Drive credentials file not found.\n\n"
+            "To connect Google Drive you need an OAuth2 client credentials file "
+            "from Google Cloud Console:\n"
+            "  1. Go to console.cloud.google.com → APIs & Services → Credentials\n"
+            "  2. Create an OAuth 2.0 Client ID (Desktop app)\n"
+            "  3. Download the JSON file\n"
+            "  4. Click 'Browse for credentials file' and select it\n\n"
+            f"Expected location:\n  {GDRIVE_CREDS_PATH}"
+        )
 
     creds = None
-    if os.path.exists(token_path):
-        with open(token_path, "rb") as f:
+    if os.path.exists(GDRIVE_TOKEN_PATH):
+        with open(GDRIVE_TOKEN_PATH, "rb") as f:
             creds = pickle.load(f)
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            flow = InstalledAppFlow.from_client_secrets_file(creds_path, SCOPES)
+            flow = InstalledAppFlow.from_client_secrets_file(GDRIVE_CREDS_PATH, SCOPES)
             creds = flow.run_local_server(port=0)
-        with open(token_path, "wb") as f:
+        with open(GDRIVE_TOKEN_PATH, "wb") as f:
             pickle.dump(creds, f)
 
     return build("drive", "v3", credentials=creds)
