@@ -142,7 +142,9 @@ def _fetch_with_claude(api_key: str, progress_cb=None) -> dict:
     today = date.today().strftime("%B %d, %Y")
     prompt = _TRENDING_PROMPT.format(today=today, year=date.today().year)
 
-    client = anthropic.Anthropic(api_key=api_key)
+    # 90-second timeout — claude-opus-4-5 with a 2k-token response can take 30-60s.
+    # Without a timeout the thread blocks indefinitely and the UI appears frozen.
+    client = anthropic.Anthropic(api_key=api_key, timeout=90.0)
 
     if progress_cb:
         progress_cb("Contacting Anthropic API…")

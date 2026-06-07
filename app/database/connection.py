@@ -110,6 +110,11 @@ MIGRATIONS = [
        )
        WHERE (sync_source IS NULL OR sync_source = '')
        AND EXISTS (SELECT 1 FROM listings WHERE listings.item_id = items.id)""",
+    # ext_listing_id links a sales record back to the platform's own listing ID,
+    # used to prevent duplicate sale entries on re-sync.
+    "ALTER TABLE sales ADD COLUMN ext_listing_id TEXT DEFAULT ''",
+    # Index to make the dupe-check fast
+    "CREATE INDEX IF NOT EXISTS idx_sales_ext ON sales(item_id, platform, ext_listing_id)",
 ]
 
 

@@ -207,6 +207,56 @@ def get_monthly_platform_totals(year: int) -> dict:
         return [dict(r) for r in rows]
 
 
+# ── Sales helpers ──────────────────────────────────────────────────────────
+
+def upsert_sale_from_listing(platform: str, item_id: int, listing: dict):
+    """
+    Auto-create a sales record from a synced sold listing.
+    Uses ext_listing_id to prevent duplicates on re-sync.
+    Silently skips if sold_price is zero (unknown price).
+    """
+    sold_price = float(listing.get("sold_price") or 0)
+    if sold_price <= 0:
+        return
+
+    ext_id = str(listing.get("listing_id", ""))
+
+    # Resolve sale date: prefer scraped sold_date, fall back to today
+    from datetime import date as _date
+    raw_date = listing.get("sold_date", "")
+    try:
+        _date.fromisoformat(str(raw_date)[:10])
+        sale_date = str(raw_date)[:10]
+    except Exception:
+        sale_date = _date.today().isoformat()
+
+    with get_connection() as conn:
+        existing = conn.execute(
+            "SELECT id FROM sales WHERE item_id=? AND platform=? AND ext_listing_id=?",
+            (item_id, platform, ext_id),
+        ).fetchone()
+        if not existing:
+            conn.execute(
+                """INSERT INTO sales
+                   (item_id, platform, sale_price, platform_fees, shipping_cost,
+                    sale_date, ext_listing_id)
+                   VALUES (?,?,?,0,0,?,?)""",
+                (item_id, platform, sold_price, sale_date, ext_id),
+            )
+
+
+def update_item_description_if_empty(item_id: int, description: str):
+    """Write description only when the item's description field is blank."""
+    if not description or not description.strip():
+        return
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE items SET description=? "
+            "WHERE id=? AND (description IS NULL OR description='')",
+            (description.strip()[:2000], item_id),
+        )
+
+
 # ── Settings ───────────────────────────────────────────────────────────────
 
 def get_setting(key: str, default: str = "") -> str:

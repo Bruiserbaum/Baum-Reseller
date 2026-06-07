@@ -228,6 +228,10 @@ class EbayService:
             sold_dom = _paginate_and_scrape(
                 page, status="sold", progress_cb=progress_cb, label="sold", max_pages=10
             )
+
+            # Enrich new items with high-res images + descriptions (capped at 25)
+            _enrich_new_items(page, active_dom + sold_dom, progress_cb=progress_cb)
+
             browser.close()
 
         dom_results = active_dom + sold_dom
@@ -356,11 +360,28 @@ def _paginate_and_scrape(page, status: str, progress_cb=None,
     return all_results
 
 
+import datetime as _dt
+
+
+def _parse_ebay_date(raw: str) -> str:
+    """Parse eBay date strings like 'Dec 5, 2025' or 'Sold Dec 5' → ISO date."""
+    if not raw:
+        return ""
+    # Strip common prefixes
+    raw = re.sub(r'^(sold|ended|on)\s*', '', raw.strip(), flags=re.IGNORECASE).strip()
+    for fmt in ("%b %d, %Y", "%B %d, %Y", "%m/%d/%y", "%m/%d/%Y", "%b %d %Y"):
+        try:
+            return _dt.datetime.strptime(raw, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return ""
+
+
 def _scrape_seller_hub(page, status: str = "active") -> list[dict]:
     """
     DOM fallback: walk every /itm/ anchor in the current page and harvest
-    title + price from its nearest container.  Works regardless of which
-    CSS classes eBay uses on a given day.
+    title, price, thumbnail, and sold date from the nearest container.
+    Works regardless of which CSS classes eBay uses on a given day.
     """
     raw = page.evaluate(r"""
         () => {
@@ -399,7 +420,39 @@ def _scrape_seller_hub(page, status: str = "active") -> list[dict]:
                     }
                 }
 
-                results.push({ url: link.href, title, price });
+                // Thumbnail image — prefer eBay CDN urls; upscale to s-l400
+                let img_url = '';
+                if (container) {
+                    const imgEl = container.querySelector(
+                        'img[src*="ebayimg"], img[src*="ebaystatic"], img[src]'
+                    );
+                    if (imgEl && imgEl.src && !imgEl.src.startsWith('data:')) {
+                        img_url = imgEl.src
+                            .replace(/s-l\d+/, 's-l400')
+                            .replace('/thumbs/', '/00/');
+                    }
+                }
+
+                // Sold / end date (seller hub sold page shows date in a cell)
+                let sold_date = '';
+                if (container) {
+                    for (const sel of [
+                        '[class*="sold-date"]', '[class*="end-date"]',
+                        '[data-testid*="date"]', 'td:nth-child(5)', 'td:nth-child(4)'
+                    ]) {
+                        const dateEl = container.querySelector(sel);
+                        if (dateEl) {
+                            const txt = dateEl.textContent.trim();
+                            // Only accept values that look like dates
+                            if (/\d/.test(txt) && txt.length < 30) {
+                                sold_date = txt;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                results.push({ url: link.href, title, price, img_url, sold_date });
             }
             return results;
         }
@@ -422,9 +475,105 @@ def _scrape_seller_hub(page, status: str = "active") -> list[dict]:
             "url":        item.get("url", ""),
             "price":      price_val,
             "status":     status,
-            "img_url":    "",
+            "img_url":    item.get("img_url", ""),
+            "sold_date":  _parse_ebay_date(item.get("sold_date", "")),
+            "description": "",
         })
     return results
+
+
+def _enrich_new_items(page, listings: list[dict],
+                      progress_cb=None, max_items: int = 25):
+    """
+    Visit individual eBay listing pages for items not yet in the database to
+    extract a high-res primary image (og:image), description text, and sold date.
+    Modifies each listing dict in-place.  Caps at max_items to keep sync times
+    reasonable; existing items (already in the DB) are skipped.
+    """
+    from app.database.models import get_item_id_for_listing
+
+    to_enrich = []
+    for listing in listings:
+        if len(to_enrich) >= max_items:
+            break
+        # Only visit detail pages for truly new items (not yet in DB)
+        if get_item_id_for_listing("ebay", listing["listing_id"]) is None:
+            to_enrich.append(listing)
+
+    if not to_enrich:
+        return
+
+    if progress_cb:
+        progress_cb(f"Fetching details for {len(to_enrich)} new listings…")
+
+    for i, listing in enumerate(to_enrich):
+        url = listing.get("url", "")
+        if not url:
+            continue
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=18_000)
+            page.wait_for_timeout(700)
+
+            data = page.evaluate("""
+                () => {
+                    // High-res primary image from og:image
+                    const ogImg = document.querySelector('meta[property="og:image"]');
+                    let img_url = ogImg ? ogImg.content : '';
+
+                    // Fallback: visible main product image
+                    if (!img_url) {
+                        for (const sel of [
+                            '#icImg', '[class*="ux-image"] img',
+                            'img[itemprop="image"]', '.vim-image img'
+                        ]) {
+                            const el = document.querySelector(sel);
+                            if (el && el.src && !el.src.startsWith('data:')) {
+                                img_url = el.src;
+                                break;
+                            }
+                        }
+                    }
+
+                    // Description — eBay wraps it in an iframe or a div
+                    let description = '';
+                    for (const sel of [
+                        '#desc_div', '[itemprop="description"]',
+                        '.d-item-description', '.itemAttr'
+                    ]) {
+                        const el = document.querySelector(sel);
+                        if (el && el.tagName !== 'IFRAME') {
+                            description = el.innerText.trim().substring(0, 1200);
+                            break;
+                        }
+                    }
+
+                    // Sold date — visible on completed/sold listing pages
+                    let sold_date = '';
+                    for (const sel of [
+                        '.ux-timer', '[class*="sold-on"]', '[class*="end-date"]',
+                        '[class*="timeLeft"]', '.vi-statusB'
+                    ]) {
+                        const el = document.querySelector(sel);
+                        if (el) { sold_date = el.textContent.trim(); break; }
+                    }
+
+                    return { img_url, description, sold_date };
+                }
+            """)
+
+            # Back-fill only missing fields
+            if data.get("img_url") and not listing.get("img_url"):
+                listing["img_url"] = data["img_url"]
+            if data.get("description"):
+                listing["description"] = data["description"]
+            if data.get("sold_date") and listing.get("status") == "sold" \
+                    and not listing.get("sold_date"):
+                parsed = _parse_ebay_date(data["sold_date"])
+                if parsed:
+                    listing["sold_date"] = parsed
+
+        except Exception:
+            pass  # Never abort the sync for a single enrichment failure
 
 
 def _extract_item_list(body: dict) -> list:

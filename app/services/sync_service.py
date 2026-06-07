@@ -83,6 +83,8 @@ def _persist_listings(platform: str, listings: list[dict]):
         upsert_listing, save_item,
         get_item_id_for_listing, upsert_image_url,
         update_sync_source_if_empty,
+        update_item_description_if_empty,
+        upsert_sale_from_listing,
     )
     for l in listings:
         # Look up an existing item via the listings table before creating a new one.
@@ -94,24 +96,36 @@ def _persist_listings(platform: str, listings: list[dict]):
             title = l.get("title", "Untitled")
             item_id = save_item({
                 "title":       title,
+                "description": l.get("description", ""),
                 "category":    infer_category(title),
-                "sync_source": platform,   # remember which platform created this item
+                "sync_source": platform,
             })
         else:
-            # Existing item — backfill sync_source if it wasn't set previously
+            # Existing item — backfill sync_source and description if blank
             update_sync_source_if_empty(item_id, platform)
+            if l.get("description"):
+                update_item_description_if_empty(item_id, l["description"])
+
+        sold_price = l.get("sold_price",
+                           l.get("price", 0) if l.get("status") == "sold" else 0)
 
         upsert_listing({
-            "item_id": item_id,
-            "platform": platform,
-            "listing_id": l["listing_id"],
-            "url": l.get("url", ""),
+            "item_id":       item_id,
+            "platform":      platform,
+            "listing_id":    l["listing_id"],
+            "url":           l.get("url", ""),
             "listing_price": l.get("price", 0),
-            "status": l.get("status", "active"),
-            "listed_date": l.get("listed_date", ""),
-            "sold_date": l.get("sold_date", ""),
-            "sold_price": l.get("sold_price", l.get("price", 0) if l.get("status") == "sold" else 0),
+            "status":        l.get("status", "active"),
+            "listed_date":   l.get("listed_date", ""),
+            "sold_date":     l.get("sold_date", ""),
+            "sold_price":    sold_price,
         })
+
+        # Auto-populate the sales/reports table for sold listings
+        if l.get("status") == "sold":
+            listing_with_price = dict(l)
+            listing_with_price["sold_price"] = sold_price
+            upsert_sale_from_listing(platform, item_id, listing_with_price)
 
         # Persist the thumbnail URL returned by the scraper (if any).
         img_url = l.get("img_url", "")

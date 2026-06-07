@@ -22,9 +22,9 @@ _TITLE_COL = 1    # title     (Interactive, auto-fills remaining space)
 _THUMB_W   = 60   # thumbnail column width in px
 _ROW_H     = 58   # row height in px
 
-# Starting widths for columns 2-8
-#  2:Platforms  3:Bin  4:Category  5:Cost  6:Listed  7:Days  8:Status
-_COL_WIDTHS = [110, 60, 140, 70, 90, 60, 80]
+# Starting widths for columns 2-9
+#  2:Platforms  3:Bin  4:Category  5:Cost  6:Listed  7:Days  8:Status  9:Desc
+_COL_WIDTHS = [110, 60, 140, 70, 90, 60, 80, 200]
 
 # Thread pool caps concurrent image downloads at 8; daemon threads won't block exit
 _IMG_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="img-loader")
@@ -196,17 +196,18 @@ class InventoryView(QWidget):
         tp_layout.setSpacing(0)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(9)
+        self.table.setColumnCount(10)
         self.table.setHorizontalHeaderLabels([
-            "",           # 0: Thumbnail
-            "Title",      # 1: auto-stretch
-            "Platforms",  # 2
-            "Bin",        # 3
-            "Category",   # 4
-            "Cost",       # 5
-            "Listed",     # 6
-            "Days",       # 7
-            "Status",     # 8
+            "",            # 0: Thumbnail
+            "Title",       # 1: auto-stretch
+            "Platforms",   # 2
+            "Bin",         # 3
+            "Category",    # 4
+            "Cost",        # 5
+            "Listed",      # 6
+            "Days",        # 7
+            "Status",      # 8
+            "Description", # 9
         ])
 
         hdr = self.table.horizontalHeader()
@@ -313,7 +314,9 @@ class InventoryView(QWidget):
 
         rows = self._all_items
         if search:
-            rows = [i for i in rows if search in i.get("title", "").lower()]
+            rows = [i for i in rows if
+                    search in i.get("title", "").lower() or
+                    search in (i.get("description") or "").lower()]
         if platform != "All":
             rows = [i for i in rows if platform.lower() in (i.get("platforms") or "").lower()]
         if category != "All":
@@ -364,6 +367,10 @@ class InventoryView(QWidget):
             title_text   = ("❓ " if is_missing else "") + item.get("title", "")
             first_listed = item.get("first_listed_date")
 
+            # Description: first line only, trimmed to 120 chars for the cell
+            desc_full = (item.get("description") or "").strip()
+            desc_short = (desc_full.split("\n")[0])[:120] if desc_full else ""
+
             text_cells = [
                 (_TITLE_COL, title_text),
                 (2, platform_str),
@@ -373,6 +380,7 @@ class InventoryView(QWidget):
                 (6, _format_date(first_listed)),
                 (7, _days_listed_str(first_listed)),
                 (8, status),
+                (9, desc_short),
             ]
             for col, text in text_cells:
                 cell = QTableWidgetItem(str(text))
