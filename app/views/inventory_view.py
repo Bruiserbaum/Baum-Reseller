@@ -142,6 +142,7 @@ class InventoryView(QWidget):
 
         fbar.addWidget(QLabel("Category:"))
         self.cat_filter = QComboBox()
+        self.cat_filter.setMinimumWidth(160)   # wide enough to read category names
         self.cat_filter.addItem("All")
         self.cat_filter.currentTextChanged.connect(self._apply_filter)
         fbar.addWidget(self.cat_filter)

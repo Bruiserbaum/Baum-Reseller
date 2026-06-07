@@ -1,6 +1,16 @@
 import sys
 import os
 
+# ── matplotlib frozen-bundle fix (MUST be set before any matplotlib import) ───
+# In a PyInstaller one-folder build, matplotlib looks for its font cache and
+# config in a writable directory.  Without MPLCONFIGDIR it falls back to the
+# bundle itself, which is read-only — causing the import (and therefore the
+# Chart tab) to fail entirely.
+if getattr(sys, "frozen", False):
+    _mpl_config = os.path.join(os.path.expanduser("~"), ".baum-reseller", "mpl-config")
+    os.makedirs(_mpl_config, exist_ok=True)
+    os.environ.setdefault("MPLCONFIGDIR", _mpl_config)
+
 # ── Playwright browser path (MUST be set before any Playwright import) ────────
 # Frozen (installed) builds: browsers are pre-bundled inside _internal by CI.
 # Development builds: browsers live in the user profile (downloaded on demand).

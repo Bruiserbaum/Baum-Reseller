@@ -64,21 +64,28 @@ def get_cached() -> dict:
     return _load_cache()
 
 
-def fetch_trending(force: bool = False, progress_cb=None) -> dict:
+def fetch_trending(force: bool = False, progress_cb=None,
+                   api_key: str | None = None) -> dict:
     """
     Fetch trending data.  Uses cache unless force=True or cache is >7 days old.
     progress_cb(message: str) is called with status updates.
+    api_key: pass a pre-fetched Anthropic key to avoid keyring calls in a
+             background thread (which can block on Windows Credential Manager).
     Returns the full trending dict (also saved to cache).
     """
     cache = _load_cache()
     if not force and _cache_is_fresh(cache):
         return cache
 
-    from app.services.anthropic_key import has_key, get_key
-    if has_key():
+    # Use the pre-fetched key if provided; only hit keyring as a fallback.
+    if api_key is None:
+        from app.services.anthropic_key import has_key, get_key
+        api_key = get_key() if has_key() else None
+
+    if api_key:
         if progress_cb:
             progress_cb("Asking Claude AI for market insights…")
-        data = _fetch_with_claude(get_key(), progress_cb)
+        data = _fetch_with_claude(api_key, progress_cb)
     else:
         if progress_cb:
             progress_cb("No AI key configured — falling back to eBay scraper…")
@@ -90,7 +97,28 @@ def fetch_trending(force: bool = False, progress_cb=None) -> dict:
 
 # ── Claude AI path ────────────────────────────────────────────────────────────
 
-_CLAUDE_MODEL = "claude-opus-4-5"
+# Ordered fallback list — tried in sequence; first 200-OK response wins.
+# Anthropic periodically deprecates dated snapshots; newer IDs are tried first
+# so the app keeps working after each deprecation without a code release.
+# If ALL fail the user sees a clear error; they can update the app for a fresh list.
+_CLAUDE_MODEL_PRIORITY = [
+    "claude-haiku-4-5",             # 2025 haiku series (fast, cheap)
+    "claude-sonnet-4-5",            # 2025 sonnet series
+    "claude-3-7-sonnet-20250219",   # Feb 2025 snapshot
+    "claude-3-5-haiku-20241022",    # Oct 2024 snapshot
+    "claude-3-haiku-20240307",      # Mar 2024 snapshot
+    "claude-3-5-sonnet-20241022",   # Oct 2024 — deprecated Jun 2026
+    "claude-3-sonnet-20240229",     # Feb 2024 — deprecated
+]
+_CLAUDE_MODEL = _CLAUDE_MODEL_PRIORITY[0]   # used for display / test
+
+# Error keywords that indicate a model is gone/deprecated → skip to the next one.
+# We check all of these so the logic survives Anthropic changing their error format.
+_MODEL_SKIP_ERRORS = (
+    "not_found", "404", "does_not_exist",
+    "model_not_found", "invalid_model", "deprecated",
+    "model_not_supported", "unknown_model",
+)
 
 _TRENDING_PROMPT = """\
 You are a reselling market intelligence expert specialising in secondhand marketplaces \
@@ -142,18 +170,37 @@ def _fetch_with_claude(api_key: str, progress_cb=None) -> dict:
     today = date.today().strftime("%B %d, %Y")
     prompt = _TRENDING_PROMPT.format(today=today, year=date.today().year)
 
-    # 90-second timeout — claude-opus-4-5 with a 2k-token response can take 30-60s.
-    # Without a timeout the thread blocks indefinitely and the UI appears frozen.
-    client = anthropic.Anthropic(api_key=api_key, timeout=90.0)
+    # 40 s per-model timeout — long enough for a real response, short enough
+    # that a hung / rate-limited model doesn't freeze the UI for minutes.
+    client = anthropic.Anthropic(api_key=api_key, timeout=40.0)
 
-    if progress_cb:
-        progress_cb("Contacting Anthropic API…")
+    # Try each model in priority order; skip deprecated/not-found ones.
+    message = None
+    used_model = _CLAUDE_MODEL
+    last_error: Exception | None = None
+    for model in _CLAUDE_MODEL_PRIORITY:
+        if progress_cb:
+            progress_cb(f"Contacting Anthropic API ({model})…")
+        try:
+            message = client.messages.create(
+                model=model,
+                max_tokens=1024,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            used_model = model
+            break
+        except Exception as exc:
+            err_str = str(exc).lower()
+            if any(kw in err_str for kw in _MODEL_SKIP_ERRORS):
+                last_error = exc
+                continue   # try next model in the list
+            raise          # real errors (auth, network, rate-limit) bubble up
 
-    message = client.messages.create(
-        model=_CLAUDE_MODEL,
-        max_tokens=2048,
-        messages=[{"role": "user", "content": prompt}],
-    )
+    if message is None:
+        raise RuntimeError(
+            f"No available Claude model found. Tried: {_CLAUDE_MODEL_PRIORITY}.\n"
+            f"Last error: {last_error}"
+        )
 
     if progress_cb:
         progress_cb("Parsing AI response…")
@@ -185,7 +232,7 @@ def _fetch_with_claude(api_key: str, progress_cb=None) -> dict:
     return {
         "fetched_at": datetime.now().isoformat(),
         "source": "claude",
-        "model": _CLAUDE_MODEL,
+        "model": used_model,
         "categories": categories,
     }
 
@@ -204,7 +251,7 @@ def test_claude_key(api_key: str) -> tuple[bool, str]:
             messages=[{"role": "user", "content": "Say OK"}],
         )
         reply = msg.content[0].text.strip()
-        return True, f"Connected ✓  (model: {_CLAUDE_MODEL}, reply: "{reply}")"
+        return True, f"Connected OK  (model: {_CLAUDE_MODEL}, reply: '{reply}')"
     except Exception as exc:
         return False, str(exc)
 

@@ -156,6 +156,24 @@ def get_item_id_for_listing(platform: str, listing_id: str) -> Optional[int]:
 
 # ── Sales ──────────────────────────────────────────────────────────────────
 
+def update_sale(sale_id: int, data: dict):
+    """Update editable fields on an existing sales record."""
+    with get_connection() as conn:
+        conn.execute(
+            """UPDATE sales
+               SET sale_price=?, platform_fees=?, shipping_cost=?, sale_date=?
+               WHERE id=?""",
+            (data.get("sale_price", 0), data.get("platform_fees", 0),
+             data.get("shipping_cost", 0), data.get("sale_date", ""),
+             sale_id),
+        )
+
+
+def delete_sale(sale_id: int):
+    with get_connection() as conn:
+        conn.execute("DELETE FROM sales WHERE id=?", (sale_id,))
+
+
 def save_sale(data: dict) -> int:
     with get_connection() as conn:
         cur = conn.execute(
@@ -190,7 +208,7 @@ def get_sales(year: Optional[int] = None, month: Optional[int] = None) -> list[d
         return [dict(r) for r in rows]
 
 
-def get_monthly_platform_totals(year: int) -> dict:
+def get_monthly_platform_totals(year: int) -> list[dict]:
     with get_connection() as conn:
         rows = conn.execute("""
             SELECT platform,
@@ -208,6 +226,17 @@ def get_monthly_platform_totals(year: int) -> dict:
 
 
 # ── Sales helpers ──────────────────────────────────────────────────────────
+
+def mark_listing_sold(listing_db_id: int, sold_price: float, sold_date: str):
+    """Flip a listing row to status='sold' and record sold_price + sold_date."""
+    with get_connection() as conn:
+        conn.execute(
+            """UPDATE listings
+               SET status='sold', sold_price=?, sold_date=?, updated_at=datetime('now')
+               WHERE id=?""",
+            (sold_price, sold_date, listing_db_id),
+        )
+
 
 def upsert_sale_from_listing(platform: str, item_id: int, listing: dict):
     """
@@ -255,6 +284,38 @@ def update_item_description_if_empty(item_id: int, description: str):
             "WHERE id=? AND (description IS NULL OR description='')",
             (description.strip()[:2000], item_id),
         )
+
+
+# ── Background task stats ─────────────────────────────────────────────────────
+
+def get_backfill_stats() -> dict:
+    """
+    Return counts of items with/without images and descriptions.
+    Used by the Sync page's Background Tasks section.
+    """
+    with get_connection() as conn:
+        total = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+        with_images = conn.execute(
+            "SELECT COUNT(DISTINCT item_id) FROM images WHERE local_path != '' AND local_path IS NOT NULL"
+        ).fetchone()[0]
+        with_desc = conn.execute(
+            "SELECT COUNT(*) FROM items WHERE description IS NOT NULL AND description != ''"
+        ).fetchone()[0]
+        dedup_pending = conn.execute(
+            "SELECT COUNT(*) FROM settings WHERE key = 'dedup_pending_count'"
+        ).fetchone()[0]
+        pending_count = 0
+        if dedup_pending:
+            try:
+                pending_count = int(get_setting("dedup_pending_count", "0"))
+            except ValueError:
+                pending_count = 0
+    return {
+        "total":             total,
+        "with_images":       min(with_images, total),
+        "with_descriptions": with_desc,
+        "dedup_pending":     pending_count,
+    }
 
 
 # ── Settings ───────────────────────────────────────────────────────────────

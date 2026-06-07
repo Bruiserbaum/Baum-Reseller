@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QProgressBar, QFrame, QScrollArea, QMessageBox,
     QDialog, QTextEdit, QDialogButtonBox, QApplication, QFileDialog,
+    QGroupBox,
 )
 from PySide6.QtCore import Qt, Signal
 
@@ -14,6 +15,26 @@ from app.utils.qt_thread import post_to_main
 
 PLATFORM_DISPLAY = {"ebay": "eBay", "mercari": "Mercari", "poshmark": "Poshmark"}
 PLATFORMS = ["ebay", "mercari", "poshmark"]
+
+
+def _fmt_ts(iso: str) -> str:
+    """Format an ISO-8601 timestamp string as a short human-readable age."""
+    try:
+        import datetime
+        dt = datetime.datetime.fromisoformat(iso)
+        delta = datetime.datetime.now() - dt
+        mins  = int(delta.total_seconds() // 60)
+        if mins < 1:
+            return "just now"
+        if mins < 60:
+            return f"{mins}m ago"
+        hours = mins // 60
+        if hours < 24:
+            return f"{hours}h ago"
+        days = hours // 24
+        return f"{days}d ago"
+    except Exception:
+        return iso[:16] if iso else "unknown"
 
 
 class SyncView(QWidget):
@@ -37,6 +58,7 @@ class SyncView(QWidget):
             )
             last = get_setting(f"last_sync_{platform}", "")
             row["last_lbl"].setText(f"Last synced: {last}" if last else "Never synced")
+        self._refresh_background_status()
 
     # ── UI construction ───────────────────────────────────────────────────
 
@@ -98,6 +120,9 @@ class SyncView(QWidget):
         for platform in PLATFORMS:
             row_widget = self._build_platform_row(platform)
             layout.addWidget(row_widget)
+
+        # ── Background Tasks status ───────────────────────────────────────
+        layout.addWidget(self._build_background_section())
 
         layout.addStretch()
         scroll.setWidget(content)
@@ -229,6 +254,190 @@ class SyncView(QWidget):
             "sync_btn":   sync_btn,
         }
         return frame
+
+    # ── Background Tasks section ──────────────────────────────────────────
+
+    def _build_background_section(self) -> QGroupBox:
+        """
+        Shows live stats on background tasks: image coverage, description
+        coverage, duplicate scan results, and sales-backfill history.
+        """
+        group = QGroupBox("Background Tasks")
+        gl = QVBoxLayout(group)
+        gl.setSpacing(8)
+
+        note = QLabel(
+            "These tasks run automatically in the background every 3 hours. "
+            "Use the buttons to trigger them manually at any time."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #a6adc8; font-size: 11px;")
+        gl.addWidget(note)
+
+        def _row(icon: str, title: str) -> tuple[QHBoxLayout, QLabel, QLabel]:
+            """Helper: one status row.  Returns (hbox, stat_lbl, time_lbl)."""
+            hb = QHBoxLayout()
+            hb.setSpacing(8)
+            icon_lbl = QLabel(icon)
+            icon_lbl.setFixedWidth(22)
+            hb.addWidget(icon_lbl)
+            title_lbl = QLabel(title)
+            title_lbl.setFixedWidth(130)
+            title_lbl.setStyleSheet("font-weight: bold;")
+            hb.addWidget(title_lbl)
+            stat_lbl = QLabel("—")
+            stat_lbl.setMinimumWidth(200)
+            hb.addWidget(stat_lbl)
+            time_lbl = QLabel("")
+            time_lbl.setStyleSheet("color: #585b70; font-size: 11px;")
+            hb.addWidget(time_lbl)
+            hb.addStretch()
+            return hb, stat_lbl, time_lbl
+
+        # ── Images row ───────────────────────────────────────────────────
+        img_hb, self._bg_img_stat, self._bg_img_time = _row("🖼", "Images")
+        gl.addLayout(img_hb)
+
+        # ── Descriptions row ─────────────────────────────────────────────
+        desc_hb, self._bg_desc_stat, self._bg_desc_time = _row("📝", "Descriptions")
+        gl.addLayout(desc_hb)
+
+        # ── Duplicate Scan row ───────────────────────────────────────────
+        dedup_hb, self._bg_dedup_stat, self._bg_dedup_time = _row("🔍", "Duplicate Scan")
+        self._bg_dedup_btn = QPushButton("Scan Now")
+        self._bg_dedup_btn.setFixedWidth(90)
+        self._bg_dedup_btn.clicked.connect(self._run_dedup_scan)
+        dedup_hb.addWidget(self._bg_dedup_btn)
+        gl.addLayout(dedup_hb)
+
+        # ── Sales Backfill row ───────────────────────────────────────────
+        bf_hb, self._bg_bf_stat, self._bg_bf_time = _row("💰", "Sales Backfill")
+        self._bg_bf_btn = QPushButton("Run Now")
+        self._bg_bf_btn.setFixedWidth(90)
+        self._bg_bf_btn.clicked.connect(self._run_sales_backfill)
+        bf_hb.addWidget(self._bg_bf_btn)
+        gl.addLayout(bf_hb)
+
+        return group
+
+    def _refresh_background_status(self):
+        """Query DB in background; update stat labels on the main thread."""
+        self._bg_img_stat.setText("Loading…")
+        self._bg_desc_stat.setText("Loading…")
+
+        def _worker():
+            try:
+                from app.database.models import get_backfill_stats, get_setting as gs
+                stats = get_backfill_stats()
+                total = stats["total"]
+                wi    = stats["with_images"]
+                wd    = stats["with_descriptions"]
+                dp    = stats["dedup_pending"]
+
+                last_dedup   = gs("last_dedup_scan", "")
+                last_bf      = gs("last_sales_backfill", "")
+
+                def _update():
+                    pct_img  = int(wi / total * 100) if total else 0
+                    pct_desc = int(wd / total * 100) if total else 0
+
+                    self._bg_img_stat.setText(
+                        f"{wi:,} / {total:,} items have images  ({pct_img}%)"
+                    )
+                    self._bg_desc_stat.setText(
+                        f"{wd:,} / {total:,} items have descriptions  ({pct_desc}%)"
+                    )
+                    self._bg_dedup_stat.setText(
+                        f"{dp} pair(s) pending review" if dp else "No duplicates pending"
+                    )
+                    self._bg_bf_stat.setText(
+                        "Syncs sold listings → sales ledger (idempotent)"
+                    )
+
+                    self._bg_dedup_time.setText(
+                        f"Last scan: {_fmt_ts(last_dedup)}" if last_dedup else "Never run"
+                    )
+                    self._bg_bf_time.setText(
+                        f"Last run: {_fmt_ts(last_bf)}" if last_bf else "Never run"
+                    )
+
+                post_to_main(_update)
+            except Exception as exc:
+                post_to_main(lambda: self._bg_img_stat.setText(f"Error: {exc}"))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _run_dedup_scan(self):
+        """Trigger a manual duplicate scan and refresh the status afterwards."""
+        self._bg_dedup_btn.setEnabled(False)
+        self._bg_dedup_btn.setText("Scanning…")
+        self._bg_dedup_stat.setText("Scanning for duplicates…")
+
+        from app.services.dedup_service import run_background_scan
+
+        def _done(candidates):
+            def _ui():
+                self._bg_dedup_btn.setEnabled(True)
+                self._bg_dedup_btn.setText("Scan Now")
+                n = len(candidates)
+                self._bg_dedup_stat.setText(
+                    f"{n} pair(s) pending review" if n else "No duplicates found"
+                )
+                self._refresh_background_status()
+                if n:
+                    QMessageBox.information(
+                        self, "Duplicate Scan Complete",
+                        f"Found {n} possible duplicate pair(s).\n\n"
+                        "Open the Inventory tab and click 'Find Duplicates' to review them."
+                    )
+            post_to_main(_ui)
+
+        run_background_scan(auto_threshold=0.92, done_cb=_done)
+
+    def _run_sales_backfill(self):
+        """Re-run the sold-listings → sales table backfill manually."""
+        self._bg_bf_btn.setEnabled(False)
+        self._bg_bf_btn.setText("Running…")
+
+        def _worker():
+            import datetime
+            try:
+                from app.database.connection import get_connection
+                from app.database.models import set_setting
+                with get_connection() as conn:
+                    conn.execute("""
+                        INSERT INTO sales
+                               (item_id, platform, sale_price, platform_fees, shipping_cost,
+                                sale_date, ext_listing_id)
+                        SELECT l.item_id, l.platform, l.sold_price, 0, 0,
+                               CASE WHEN l.sold_date IS NOT NULL AND l.sold_date != ''
+                                    THEN l.sold_date ELSE date('now') END,
+                               l.listing_id
+                        FROM listings l
+                        WHERE l.status = 'sold'
+                          AND l.sold_price > 0
+                          AND NOT EXISTS (
+                              SELECT 1 FROM sales s
+                              WHERE s.item_id = l.item_id
+                                AND s.platform = l.platform
+                                AND s.ext_listing_id = l.listing_id
+                          )
+                    """)
+                set_setting("last_sales_backfill",
+                            datetime.datetime.now().isoformat(timespec="seconds"))
+                def _done_ui():
+                    self._bg_bf_btn.setEnabled(True)
+                    self._bg_bf_btn.setText("Run Now")
+                    self._refresh_background_status()
+                post_to_main(_done_ui)
+            except Exception as exc:
+                def _err_ui(e=exc):
+                    self._bg_bf_btn.setEnabled(True)
+                    self._bg_bf_btn.setText("Run Now")
+                    QMessageBox.warning(self, "Backfill Error", str(e))
+                post_to_main(_err_ui)
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     # ── Connection helpers ────────────────────────────────────────────────
 
