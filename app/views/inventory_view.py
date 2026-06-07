@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
     QPushButton, QLabel, QLineEdit, QHeaderView, QAbstractItemView,
     QComboBox, QProgressBar, QStackedWidget, QStyledItemDelegate,
+    QDialog, QScrollArea, QFrame, QMessageBox,
 )
 from PySide6.QtCore import Qt, QTimer, QSize
 from PySide6.QtGui import QColor, QPixmap, QImage
@@ -25,6 +26,9 @@ _ROW_H     = 58   # row height in px
 # Starting widths for columns 2-9
 #  2:Platforms  3:Bin  4:Category  5:Cost  6:Listed  7:Days  8:Status  9:Desc
 _COL_WIDTHS = [110, 60, 140, 70, 90, 60, 80, 200]
+
+_CATEGORY_COL = 4    # absolute column index for "Category"
+_CAT_MIN_W    = 120  # Category column will never shrink below this many px
 
 # Thread pool caps concurrent image downloads at 8; daemon threads won't block exit
 _IMG_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="img-loader")
@@ -149,6 +153,14 @@ class InventoryView(QWidget):
         fbar.addWidget(self._hide_unlisted_btn)
 
         fbar.addStretch()
+
+        self._dedup_btn = QPushButton("Find Duplicates")
+        self._dedup_btn.setToolTip(
+            "Scan inventory for cross-platform duplicates and offer to merge them"
+        )
+        self._dedup_btn.clicked.connect(self._run_dedup)
+        fbar.addWidget(self._dedup_btn)
+
         self.count_label = QLabel("0 items")
         fbar.addWidget(self.count_label)
         root.addLayout(fbar)
@@ -242,8 +254,14 @@ class InventoryView(QWidget):
         super().resizeEvent(event)
         QTimer.singleShot(0, self._fit_title_col)
 
-    def _on_col_resized(self, col: int, _old: int, _new: int):
+    def _on_col_resized(self, col: int, _old: int, new_size: int):
         """When any non-title column is dragged, title absorbs the slack."""
+        # Enforce a readable minimum for the Category column
+        if col == _CATEGORY_COL and new_size < _CAT_MIN_W:
+            hdr = self.table.horizontalHeader()
+            hdr.blockSignals(True)
+            self.table.setColumnWidth(_CATEGORY_COL, _CAT_MIN_W)
+            hdr.blockSignals(False)
         if col != _TITLE_COL:
             self._fit_title_col()
 
@@ -460,3 +478,152 @@ class InventoryView(QWidget):
                 dlg = ItemDetailDialog(item_id, parent=self)
                 if dlg.exec():
                     self.refresh()
+
+    # ── Deduplication ─────────────────────────────────────────────────────────
+
+    def _run_dedup(self):
+        from app.services.dedup_service import run_background_scan
+        self._dedup_btn.setEnabled(False)
+        self._dedup_btn.setText("Scanning…")
+
+        def _done(candidates):
+            post_to_main(lambda: self._show_dedup_results(candidates))
+
+        run_background_scan(auto_threshold=0.92, done_cb=_done)
+
+    def _show_dedup_results(self, candidates):
+        self._dedup_btn.setEnabled(True)
+        self._dedup_btn.setText("Find Duplicates")
+
+        if not candidates:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.information(
+                self, "No Duplicates Found",
+                "No cross-platform duplicate listings were detected.\n\n"
+                "Items already linked across platforms (same item record) are not shown.",
+            )
+            self.refresh()   # pick up any auto-merges
+            return
+
+        dlg = DuplicatesDialog(candidates, parent=self)
+        dlg.exec()
+        self.refresh()
+
+
+# ── Duplicate review dialog ───────────────────────────────────────────────────
+
+class DuplicatesDialog(QDialog):
+    """
+    Shows candidate duplicate pairs for review.
+    User can Merge (keep left item, delete right) or Skip each pair.
+    """
+
+    def __init__(self, candidates, parent=None):
+        from PySide6.QtWidgets import (
+            QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+            QScrollArea, QWidget, QFrame,
+        )
+        super().__init__(parent)
+        self.setWindowTitle(f"Duplicate Review — {len(candidates)} candidate pairs")
+        self.setMinimumSize(900, 600)
+        self.resize(1050, 700)
+
+        root = QVBoxLayout(self)
+
+        info = QLabel(
+            f"Found <b>{len(candidates)}</b> possible cross-platform duplicates.  "
+            "Items with score ≥ 92% were auto-merged already.\n"
+            "Review the remaining pairs below — <b>Merge</b> combines the right item "
+            "into the left, <b>Skip</b> leaves them separate."
+        )
+        info.setWordWrap(True)
+        info.setTextFormat(Qt.RichText)
+        root.addWidget(info)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        container = QWidget()
+        self._rows_layout = QVBoxLayout(container)
+        self._rows_layout.setSpacing(6)
+
+        self._candidates = list(candidates)
+        self._row_widgets: list[QWidget] = []
+        self._merges_done = 0
+
+        for c in self._candidates:
+            row = self._build_row(c)
+            self._rows_layout.addWidget(row)
+            self._row_widgets.append(row)
+
+        self._rows_layout.addStretch()
+        scroll.setWidget(container)
+        root.addWidget(scroll, 1)
+
+        done_btn = QPushButton("Done")
+        done_btn.clicked.connect(self.accept)
+        root.addWidget(done_btn)
+
+    def _build_row(self, c) -> QWidget:
+        from PySide6.QtWidgets import QFrame, QHBoxLayout, QVBoxLayout, QLabel, QPushButton
+        from app.services.dedup_service import Candidate
+
+        frame = QFrame()
+        frame.setFrameShape(QFrame.StyledPanel)
+        h = QHBoxLayout(frame)
+        h.setSpacing(12)
+
+        # Left item info
+        left = QVBoxLayout()
+        left.addWidget(QLabel(f"<b>{c.title_a[:70]}</b>"))
+        left.addWidget(QLabel(f"<span style='color:#89b4fa'>{c.plats_a}</span>"))
+        h.addLayout(left, 3)
+
+        # Score badge
+        score_color = "#a6e3a1" if c.score >= 0.85 else "#fab387"
+        badge = QLabel(
+            f"<b style='color:{score_color}'>{c.score*100:.0f}%</b><br>"
+            f"<small style='color:#585b70'>{c.method}</small>"
+        )
+        badge.setTextFormat(Qt.RichText)
+        badge.setAlignment(Qt.AlignCenter)
+        h.addWidget(badge, 1)
+
+        # Right item info
+        right = QVBoxLayout()
+        right.addWidget(QLabel(f"<b>{c.title_b[:70]}</b>"))
+        right.addWidget(QLabel(f"<span style='color:#cba6f7'>{c.plats_b}</span>"))
+        h.addLayout(right, 3)
+
+        # Action buttons
+        btns = QVBoxLayout()
+
+        merge_btn = QPushButton("Merge →")
+        merge_btn.setObjectName("primaryButton")
+        merge_btn.clicked.connect(lambda _, cand=c, fw=frame: self._do_merge(cand, fw))
+        btns.addWidget(merge_btn)
+
+        skip_btn = QPushButton("Skip")
+        skip_btn.clicked.connect(frame.hide)
+        btns.addWidget(skip_btn)
+
+        h.addLayout(btns)
+        return frame
+
+    def _do_merge(self, c, frame):
+        from PySide6.QtWidgets import QMessageBox
+        from app.services.dedup_service import merge
+        reply = QMessageBox.question(
+            self, "Confirm Merge",
+            f"Merge:\n  {c.title_b}\ninto:\n  {c.title_a}\n\n"
+            "All listings, images and sales will move to the left item. "
+            "The right item will be deleted.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            try:
+                merge(c.id_a, c.id_b)
+                self._merges_done += 1
+                frame.hide()
+            except Exception as exc:
+                QMessageBox.critical(self, "Merge Failed", str(exc))

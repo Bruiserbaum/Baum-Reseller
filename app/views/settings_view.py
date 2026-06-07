@@ -5,16 +5,13 @@ import threading
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QGroupBox, QScrollArea, QMessageBox,
-    QComboBox, QProgressBar, QFileDialog, QFrame, QLineEdit,
+    QComboBox, QProgressBar, QFileDialog, QLineEdit,
 )
 from PySide6.QtCore import Qt
 from app.utils.qt_thread import post_to_main
 
 from app.database.models import get_setting, set_setting
 from version import VERSION
-
-
-PLATFORM_DISPLAY = {"ebay": "eBay", "mercari": "Mercari", "poshmark": "Poshmark"}
 
 
 class SettingsView(QWidget):
@@ -41,31 +38,19 @@ class SettingsView(QWidget):
         title.setObjectName("pageTitle")
         layout.addWidget(title)
 
-        # ── Platform Connections ──────────────────────────────────────────
-        conn_group = QGroupBox("Platform Connections")
-        conn_layout = QVBoxLayout(conn_group)
-
-        note = QLabel(
-            "Recommended: click 'Login (Browser)' — a browser window opens, log in normally "
-            "(MFA, Google SSO, and captcha all work), session saves automatically.\n"
-            "Alternative: log in to each platform in your normal browser, then click "
-            "'Import Session'.\n"
-            "If Import Session fails (Chrome 127+ App-Bound Encryption), use "
-            "'Import from File' with the 'Get cookies.txt LOCALLY' Chrome extension."
+        # ── Platform Connections (moved to Sync tab) ──────────────────────
+        conn_note = QLabel(
+            "🔗  <b>Platform Connections</b> (Login, Import Session, Log Out, Sync) "
+            "have moved to the <b>Sync</b> tab — so login and syncing are all in one place."
         )
-        note.setWordWrap(True)
-        note.setStyleSheet("color: #a6adc8; font-size: 11px;")
-        conn_layout.addWidget(note)
-
-        self._platform_rows: dict[str, dict] = {}
-        self._platform_rows["ebay"]     = self._build_browser_row("ebay")
-        self._platform_rows["mercari"]  = self._build_browser_row("mercari")
-        self._platform_rows["poshmark"] = self._build_browser_row("poshmark")
-
-        for row in self._platform_rows.values():
-            conn_layout.addWidget(row["widget"])
-
-        layout.addWidget(conn_group)
+        conn_note.setTextFormat(Qt.RichText)
+        conn_note.setWordWrap(True)
+        conn_note.setStyleSheet(
+            "color: #cdd6f4; font-size: 12px; "
+            "background: #252535; border-left: 4px solid #89b4fa; "
+            "border-radius: 4px; padding: 12px;"
+        )
+        layout.addWidget(conn_note)
 
         # ── Anthropic API Key ─────────────────────────────────────────────
         ai_group = QGroupBox("Trending & AI Insights")
@@ -211,122 +196,9 @@ class SettingsView(QWidget):
         layout.addStretch()
         scroll.setWidget(content)
 
-    # ── Platform row builder ──────────────────────────────────────────────
-
-    def _build_browser_row(self, platform: str) -> dict:
-        label = PLATFORM_DISPLAY[platform]
-
-        container = QFrame()
-        container.setObjectName("platformRow")
-
-        # Two sub-rows: status line + action buttons
-        col = QVBoxLayout(container)
-        col.setContentsMargins(10, 10, 10, 10)
-        col.setSpacing(4)
-
-        # ── Row 1: name · dot · status · last-sync ────────────────────────
-        top = QHBoxLayout()
-        name_lbl = QLabel(label)
-        name_lbl.setFixedWidth(90)
-        top.addWidget(name_lbl)
-
-        dot = QLabel("●")
-        dot.setObjectName("statusDotUnknown")
-        dot.setFixedWidth(20)
-        top.addWidget(dot)
-
-        status_lbl = QLabel("Not connected")
-        status_lbl.setMinimumWidth(260)
-        top.addWidget(status_lbl)
-
-        last_lbl = QLabel("")
-        last_lbl.setStyleSheet("color:#585b70; font-size:11px;")
-        top.addWidget(last_lbl)
-        top.addStretch()
-        col.addLayout(top)
-
-        # ── Row 2: action buttons ─────────────────────────────────────────
-        btns = QHBoxLayout()
-
-        login_btn = QPushButton("Login (Browser)")
-        login_btn.setObjectName("primaryButton")
-        login_btn.setToolTip(
-            "Opens a Chromium browser window — log in however you like.\n"
-            "MFA, Google SSO, and captcha all work normally.\n"
-            "Session is saved automatically. No cookie decryption needed.\n\n"
-            "Use this if 'Import Session' fails due to Chrome encryption."
-        )
-        login_btn.clicked.connect(
-            lambda checked=False, p=platform, sl=status_lbl, sd=dot, lb=login_btn:
-            self._login_playwright(p, sl, sd, lb)
-        )
-        btns.addWidget(login_btn)
-
-        open_btn = QPushButton("Open in Browser")
-        open_btn.setToolTip(
-            f"Opens {label} in your normal browser. Log in if needed, "
-            "then click 'Import Session'."
-        )
-        open_btn.clicked.connect(
-            lambda checked=False, p=platform, sl=status_lbl:
-            self._open_in_browser(p, sl)
-        )
-        btns.addWidget(open_btn)
-
-        import_btn = QPushButton("Import Session")
-        import_btn.setToolTip(
-            "Reads your existing login cookies from Chrome/Edge/Firefox automatically.\n"
-            "If this fails with a permissions or encryption error, use 'Login (Browser)' instead."
-        )
-        import_btn.clicked.connect(
-            lambda checked=False, p=platform, sl=status_lbl, sd=dot, ib=import_btn:
-            self._import_session(p, sl, sd, ib)
-        )
-        btns.addWidget(import_btn)
-
-        file_btn = QPushButton("Import from File…")
-        file_btn.setToolTip(
-            "Import cookies from a file exported by the 'Get cookies.txt LOCALLY' "
-            "or 'Cookie-Editor' extension. No admin rights needed."
-        )
-        file_btn.clicked.connect(
-            lambda checked=False, p=platform, sl=status_lbl, sd=dot:
-            self._import_from_file(p, sl, sd)
-        )
-        btns.addWidget(file_btn)
-
-        btns.addStretch()
-
-        test_btn = QPushButton("Test")
-        test_btn.clicked.connect(
-            lambda checked=False, p=platform, sl=status_lbl, sd=dot:
-            self._test_platform_async(p, sl, sd)
-        )
-        btns.addWidget(test_btn)
-
-        logout_btn = QPushButton("Log Out")
-        logout_btn.clicked.connect(
-            lambda checked=False, p=platform, sl=status_lbl, sd=dot:
-            self._logout_platform(p, sl, sd)
-        )
-        btns.addWidget(logout_btn)
-
-        col.addLayout(btns)
-
-        return {"widget": container, "status_label": status_lbl,
-                "status_dot": dot, "last_sync": last_lbl}
-
     # ── Settings loading ──────────────────────────────────────────────────
 
     def _load_settings(self):
-        for p, row in self._platform_rows.items():
-            last_p = get_setting(f"last_sync_{p}", "")
-            row["last_sync"].setText(f"Last synced: {last_p}" if last_p else "")
-            svc = self._get_service(p)
-            if svc.has_session():
-                self._set_dot(row["status_dot"], "ok")
-                row["status_label"].setText("Connected — ready to sync")
-
         # Anthropic API key — show masked version if stored
         from app.services.anthropic_key import get_key, masked
         stored = get_key()
@@ -422,170 +294,6 @@ class SettingsView(QWidget):
         self._api_key_field.setPlaceholderText("sk-ant-…  (paste your Anthropic API key)")
         self._api_key_status.setText("Key cleared")
         self._api_key_status.setStyleSheet("color: #a6adc8; font-size: 11px;")
-
-    # ── Platform helpers ──────────────────────────────────────────────────
-
-    @staticmethod
-    def _get_service(platform: str):
-        if platform == "ebay":
-            from app.services.ebay_service import EbayService
-            return EbayService()
-        if platform == "mercari":
-            from app.services.mercari_service import MercariService
-            return MercariService()
-        from app.services.poshmark_service import PoshmarkService
-        return PoshmarkService()
-
-    def _set_dot(self, dot: QLabel, state: str):
-        name = {"ok": "statusDotOk", "error": "statusDotError"}.get(state, "statusDotUnknown")
-        dot.setObjectName(name)
-        dot.style().unpolish(dot)
-        dot.style().polish(dot)
-        dot.update()
-
-    # ── Login (Playwright browser) — the primary fix ──────────────────────
-
-    def _login_playwright(self, platform: str, status_lbl: QLabel,
-                          dot: QLabel, login_btn: QPushButton):
-        """Open Playwright's own headed browser for login. Works with MFA/2FA."""
-        svc = self._get_service(platform)
-        if not hasattr(svc, "login"):
-            QMessageBox.information(
-                self, f"{PLATFORM_DISPLAY[platform]} Login",
-                f"{PLATFORM_DISPLAY[platform]} uses 'Open in Browser' + 'Import Session'.\n"
-                "Log in in your system browser, then click Import Session."
-            )
-            return
-
-        login_btn.setEnabled(False)
-        login_btn.setText("Browser opening…")
-        status_lbl.setText("Waiting — log in and the app will detect it automatically…")
-        self._set_dot(dot, "unknown")
-
-        def _done(ok: bool, msg: str | None):
-            def _update():
-                login_btn.setEnabled(True)
-                login_btn.setText("Login (Browser)")
-                if ok:
-                    self._set_dot(dot, "ok")
-                    status_lbl.setText("Connected — session saved")
-                    QMessageBox.information(
-                        self,
-                        f"{PLATFORM_DISPLAY[platform]} — Logged In",
-                        f"Session saved successfully.\n\nYou can now click Sync to fetch your listings.",
-                    )
-                else:
-                    self._set_dot(dot, "error")
-                    status_lbl.setText("Login failed — see error")
-                    QMessageBox.warning(
-                        self, f"{PLATFORM_DISPLAY[platform]} — Login Failed",
-                        str(msg or "Unknown error"),
-                    )
-            post_to_main(_update)
-
-        svc.login(done_cb=_done)
-
-    # ── Open in browser (system browser fallback) ─────────────────────────
-
-    def _open_in_browser(self, platform: str, status_lbl: QLabel):
-        svc = self._get_service(platform)
-        svc.open_in_browser()
-        status_lbl.setText(
-            f"Opened in your browser — log in, then click Import Session"
-        )
-
-    # ── Import session ────────────────────────────────────────────────────
-
-    def _import_session(self, platform: str, status_lbl: QLabel,
-                        dot: QLabel, import_btn: QPushButton):
-        import_btn.setEnabled(False)
-        status_lbl.setText("Reading cookies from your browser…")
-        self._set_dot(dot, "unknown")
-
-        svc = self._get_service(platform)
-
-        def _done(ok: bool, msg: str):
-            post_to_main(lambda: self._on_import_done(ok, msg, platform, status_lbl, dot, import_btn))
-
-        svc.import_session(done_cb=_done)
-
-    def _on_import_done(self, ok: bool, msg: str, platform: str,
-                        status_lbl: QLabel, dot: QLabel, import_btn: QPushButton):
-        import_btn.setEnabled(True)
-        if ok:
-            self._set_dot(dot, "ok")
-            status_lbl.setText("Connected — session imported")
-            QMessageBox.information(
-                self, f"{PLATFORM_DISPLAY[platform]} — Session Imported",
-                f"✓ {msg}\n\nYou can now click Sync to fetch your listings."
-            )
-        else:
-            self._set_dot(dot, "error")
-            status_lbl.setText("Import failed — see error for details")
-            QMessageBox.warning(
-                self, f"{PLATFORM_DISPLAY[platform]} — Import Failed",
-                msg
-            )
-
-    def _import_from_file(self, platform: str, status_lbl: QLabel, dot: QLabel):
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            f"Import {PLATFORM_DISPLAY[platform]} Cookies",
-            "",
-            "Cookie Files (*.txt *.json);;All Files (*)"
-        )
-        if not path:
-            return
-
-        svc = self._get_service(platform)
-        ok, msg = svc.import_from_file(path)
-        if ok:
-            self._set_dot(dot, "ok")
-            status_lbl.setText("Connected — session imported from file")
-            QMessageBox.information(
-                self, f"{PLATFORM_DISPLAY[platform]} — Imported",
-                f"✓ {msg}\n\nYou can now click Sync to fetch your listings."
-            )
-        else:
-            self._set_dot(dot, "error")
-            status_lbl.setText("Import failed")
-            QMessageBox.warning(self, f"{PLATFORM_DISPLAY[platform]} — Import Failed", msg)
-
-    def _logout_platform(self, platform: str, status_lbl: QLabel, dot: QLabel):
-        svc = self._get_service(platform)
-        if hasattr(svc, "clear_session"):
-            svc.clear_session()
-        self._set_dot(dot, "unknown")
-        status_lbl.setText("Logged out — click Login (Browser) or Import Session to reconnect")
-
-    # ── Test (runs in background thread) ─────────────────────────────────
-
-    def _test_platform_async(self, platform: str, status_lbl: QLabel, dot: QLabel):
-        status_lbl.setText("Testing…")
-        self._set_dot(dot, "unknown")
-
-        def _run():
-            svc = self._get_service(platform)
-            try:
-                ok, msg = svc.test_connection()
-            except Exception as e:
-                ok, msg = False, str(e)
-            post_to_main(lambda: self._on_test_done(ok, msg, platform, status_lbl, dot))
-
-        threading.Thread(target=_run, daemon=True).start()
-
-    def _on_test_done(self, ok: bool, msg: str, platform: str,
-                      status_lbl: QLabel, dot: QLabel):
-        self._set_dot(dot, "ok" if ok else "error")
-        status_lbl.setText(msg)
-        if ok:
-            QMessageBox.information(
-                self, f"{PLATFORM_DISPLAY[platform]} — Connection Test", f"✓ {msg}"
-            )
-        else:
-            QMessageBox.warning(
-                self, f"{PLATFORM_DISPLAY[platform]} — Connection Test", f"✗ {msg}"
-            )
 
     # ── Update ────────────────────────────────────────────────────────────
 

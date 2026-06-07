@@ -1,6 +1,7 @@
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QScrollArea, QFrame, QLineEdit, QDialog, QDialogButtonBox
+    QScrollArea, QFrame, QLineEdit, QDialog, QDialogButtonBox,
+    QCheckBox, QGroupBox,
 )
 from PySide6.QtCore import Qt, Signal
 
@@ -8,6 +9,7 @@ from app.services.notification_service import (
     get_active_notifications, dismiss_notification, dismiss_all,
     mark_shipped, mark_found, mark_missing
 )
+from app.database.models import get_setting, set_setting
 
 TYPE_ICONS = {
     "unshipped":    ("📦", "#fab387"),   # orange
@@ -48,6 +50,49 @@ class NotificationsView(QWidget):
         header.addWidget(dismiss_all_btn)
         layout.addLayout(header)
 
+        # ── Alert Configuration ───────────────────────────────────────────
+        config_group = QGroupBox("Alert Configuration")
+        config_layout = QVBoxLayout(config_group)
+        config_layout.setSpacing(8)
+
+        config_note = QLabel(
+            "Enable or disable alert types below. Unchecked types will be hidden from this page. "
+            "Alerts are generated automatically when items match the condition (e.g. a sale goes "
+            "unshipped for 3+ days, an item is still listed after being sold, or an item is "
+            "marked missing)."
+        )
+        config_note.setWordWrap(True)
+        config_note.setStyleSheet("color: #a6adc8; font-size: 11px;")
+        config_layout.addWidget(config_note)
+
+        checks_row = QHBoxLayout()
+        checks_row.setSpacing(20)
+        self._alert_checks: dict[str, QCheckBox] = {}
+
+        _ALERT_TYPES = [
+            ("unshipped",    "📦  Unshipped Sales",
+             "Alerts when a sale has no tracking/shipping after 3+ days"),
+            ("still_listed", "⚠️  Still Listed",
+             "Alerts when an item is still active on a platform after being sold"),
+            ("missing",      "❓  Missing Items",
+             "Alerts for items marked as missing from your inventory"),
+        ]
+
+        for type_key, label_text, tooltip in _ALERT_TYPES:
+            cb = QCheckBox(label_text)
+            cb.setToolTip(tooltip)
+            enabled = get_setting(f"alert_enabled_{type_key}", "1") != "0"
+            cb.setChecked(enabled)
+            cb.toggled.connect(
+                lambda checked, k=type_key: self._on_alert_toggle(k, checked)
+            )
+            checks_row.addWidget(cb)
+            self._alert_checks[type_key] = cb
+
+        checks_row.addStretch()
+        config_layout.addLayout(checks_row)
+        layout.addWidget(config_group)
+
         # Scroll area for notification cards
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -73,7 +118,14 @@ class NotificationsView(QWidget):
             if item.widget():
                 item.widget().deleteLater()
 
-        notifications = get_active_notifications()
+        # Filter by enabled alert types
+        enabled_types = {
+            k for k in ("unshipped", "still_listed", "missing")
+            if get_setting(f"alert_enabled_{k}", "1") != "0"
+        }
+        all_notifications = get_active_notifications()
+        notifications = [n for n in all_notifications if n.get("type") in enabled_types]
+
         self.empty_label.setVisible(len(notifications) == 0)
         self.cards_container.setVisible(len(notifications) > 0)
 
@@ -144,6 +196,13 @@ class NotificationsView(QWidget):
 
         row.addLayout(btn_col)
         return card
+
+    # ── Alert type toggles ────────────────────────────────────────────────
+
+    def _on_alert_toggle(self, type_key: str, enabled: bool):
+        """Persist the alert-type toggle and refresh the displayed cards."""
+        set_setting(f"alert_enabled_{type_key}", "1" if enabled else "0")
+        self.refresh()
 
     # ── Actions ───────────────────────────────────────────────────────────
 
