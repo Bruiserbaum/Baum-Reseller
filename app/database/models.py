@@ -54,8 +54,9 @@ def get_item(item_id: int) -> Optional[dict]:
 
 def save_item(data: dict) -> int:
     fields = ("title", "description", "bin_location", "category",
-              "purchase_cost", "purchase_date", "notes", "sync_source")
-    values = tuple(data.get(f, "" if f != "purchase_cost" else 0) for f in fields)
+              "purchase_cost", "purchase_date", "notes", "sync_source", "item_status")
+    defaults = {"purchase_cost": 0, "item_status": "active"}
+    values = tuple(data.get(f, defaults.get(f, "")) for f in fields)
     with get_connection() as conn:
         if data.get("id"):
             conn.execute(
@@ -206,6 +207,22 @@ def get_sales(year: Optional[int] = None, month: Optional[int] = None) -> list[d
             ORDER BY s.sale_date DESC
         """, params).fetchall()
         return [dict(r) for r in rows]
+
+
+def get_sale_by_id(sale_id: int) -> Optional[dict]:
+    """Fetch a single sale record (with item title/cost) by its primary key."""
+    with get_connection() as conn:
+        row = conn.execute("""
+            SELECT s.*,
+                   i.title,
+                   i.purchase_cost,
+                   (s.sale_price - s.platform_fees - s.shipping_cost
+                    - COALESCE(i.purchase_cost, 0)) AS profit
+            FROM sales s
+            JOIN items i ON i.id = s.item_id
+            WHERE s.id = ?
+        """, (sale_id,)).fetchone()
+        return dict(row) if row else None
 
 
 def get_monthly_platform_totals(year: int) -> list[dict]:

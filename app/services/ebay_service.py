@@ -485,42 +485,59 @@ def _scrape_seller_hub(page, status: str = "active") -> list[dict]:
 def _enrich_new_items(page, listings: list[dict],
                       progress_cb=None, max_items: int = 25):
     """
-    Visit individual eBay listing pages for items not yet in the database to
-    extract a high-res primary image (og:image), description text, and sold date.
-    Modifies each listing dict in-place.  Caps at max_items to keep sync times
-    reasonable; existing items (already in the DB) are skipped.
+    Visit individual eBay listing pages to extract high-res images, description
+    text, and sold date.  Modifies each listing dict in-place.
+
+    Priority order for enrichment:
+      1. New items (not yet in DB at all) — always enriched
+      2. Existing items whose description is empty — enriched up to remaining budget
+
+    Description strategy: eBay puts the seller's HTML description inside an iframe
+    (#desc_div) whose content is NOT accessible via innerText.  Instead we collect:
+      • og:description  — page-level meta, usually the item title + condition
+      • meta[name=description] — standard description meta
+      • Item specifics table (.ux-labels-values) — condition, brand, size, etc.
+      • Short description / highlights section
     """
     from app.database.models import get_item_id_for_listing
+    from app.database.connection import get_connection
 
-    to_enrich = []
+    to_enrich: list[dict] = []
     for listing in listings:
         if len(to_enrich) >= max_items:
             break
-        # Only visit detail pages for truly new items (not yet in DB)
-        if get_item_id_for_listing("ebay", listing["listing_id"]) is None:
+        item_id = get_item_id_for_listing("ebay", listing["listing_id"])
+        if item_id is None:
+            # Brand-new item — definitely enrich
             to_enrich.append(listing)
+        else:
+            # Existing item — enrich only if description is still empty
+            with get_connection() as conn:
+                row = conn.execute(
+                    "SELECT description FROM items WHERE id=?", (item_id,)
+                ).fetchone()
+            if row and not (row["description"] or "").strip():
+                to_enrich.append(listing)
 
     if not to_enrich:
         return
 
     if progress_cb:
-        progress_cb(f"Fetching details for {len(to_enrich)} new listings…")
+        progress_cb(f"Fetching details for {len(to_enrich)} listings…")
 
-    for i, listing in enumerate(to_enrich):
+    for listing in to_enrich:
         url = listing.get("url", "")
         if not url:
             continue
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=18_000)
-            page.wait_for_timeout(700)
+            page.wait_for_timeout(800)
 
             data = page.evaluate("""
                 () => {
-                    // High-res primary image from og:image
+                    // ── Image ──────────────────────────────────────────────
                     const ogImg = document.querySelector('meta[property="og:image"]');
                     let img_url = ogImg ? ogImg.content : '';
-
-                    // Fallback: visible main product image
                     if (!img_url) {
                         for (const sel of [
                             '#icImg', '[class*="ux-image"] img',
@@ -534,20 +551,53 @@ def _enrich_new_items(page, listings: list[dict],
                         }
                     }
 
-                    // Description — eBay wraps it in an iframe or a div
-                    let description = '';
+                    // ── Description ────────────────────────────────────────
+                    // Strategy: avoid the #desc_div iframe (content not accessible).
+                    // Pull from meta tags + item specifics table instead.
+                    let descParts = [];
+
+                    // 1. og:description meta
+                    const ogDesc = document.querySelector('meta[property="og:description"]');
+                    if (ogDesc && ogDesc.content) descParts.push(ogDesc.content.trim());
+
+                    // 2. standard meta description (often richer)
+                    const metaDesc = document.querySelector('meta[name="description"]');
+                    if (metaDesc && metaDesc.content) {
+                        const md = metaDesc.content.trim();
+                        if (md && !descParts.some(p => p.includes(md.substring(0, 40))))
+                            descParts.push(md);
+                    }
+
+                    // 3. Item specifics: grab label→value pairs from the spec table
+                    const specRows = document.querySelectorAll('.ux-labels-values__labels-content, .ux-labels-values');
+                    const specPairs = [];
+                    specRows.forEach(row => {
+                        const labels = row.querySelectorAll('.ux-labels-values__labels');
+                        const values = row.querySelectorAll('.ux-labels-values__values');
+                        for (let i = 0; i < Math.min(labels.length, values.length); i++) {
+                            const lbl = labels[i].textContent.trim();
+                            const val = values[i].textContent.trim();
+                            if (lbl && val) specPairs.push(lbl + ': ' + val);
+                        }
+                    });
+                    if (specPairs.length) descParts.push(specPairs.join(' | '));
+
+                    // 4. Short highlights / condition description
                     for (const sel of [
-                        '#desc_div', '[itemprop="description"]',
-                        '.d-item-description', '.itemAttr'
+                        '.d-shortdescription', '.ux-section-highlights',
+                        '[data-testid="x-item-condition-text"]',
+                        '.condText', '.viSNotesCnt'
                     ]) {
                         const el = document.querySelector(sel);
-                        if (el && el.tagName !== 'IFRAME') {
-                            description = el.innerText.trim().substring(0, 1200);
-                            break;
+                        if (el) {
+                            const t = el.innerText.trim();
+                            if (t) { descParts.push(t); break; }
                         }
                     }
 
-                    // Sold date — visible on completed/sold listing pages
+                    const description = descParts.join('\\n').trim().substring(0, 1500);
+
+                    // ── Sold date ──────────────────────────────────────────
                     let sold_date = '';
                     for (const sel of [
                         '.ux-timer', '[class*="sold-on"]', '[class*="end-date"]',
@@ -561,10 +611,10 @@ def _enrich_new_items(page, listings: list[dict],
                 }
             """)
 
-            # Back-fill only missing fields
+            # Back-fill only missing/empty fields
             if data.get("img_url") and not listing.get("img_url"):
                 listing["img_url"] = data["img_url"]
-            if data.get("description"):
+            if data.get("description") and not listing.get("description"):
                 listing["description"] = data["description"]
             if data.get("sold_date") and listing.get("status") == "sold" \
                     and not listing.get("sold_date"):

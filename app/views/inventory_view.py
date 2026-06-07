@@ -69,6 +69,25 @@ def _days_listed_str(first_date) -> str:
         return "—"
 
 
+# ── Status helpers ────────────────────────────────────────────────────────────
+
+def _item_status_label(item: dict) -> str:
+    """
+    Return the display-status string for a single item dict.
+    Priority: active listings > sold listings > pending > unlisted.
+    Matches the values in the Status filter combobox.
+    """
+    active_count = item.get("listing_count", 0) or 0
+    sold_count   = item.get("sold_count", 0) or 0
+    if active_count:
+        return "Active"
+    if sold_count:
+        return "Sold"
+    if item.get("item_status") == "pending":
+        return "Pending Listing"
+    return "Unlisted"
+
+
 # ── Thumbnail delegate ────────────────────────────────────────────────────────
 
 class ThumbnailDelegate(QStyledItemDelegate):
@@ -146,6 +165,13 @@ class InventoryView(QWidget):
         self.cat_filter.addItem("All")
         self.cat_filter.currentTextChanged.connect(self._apply_filter)
         fbar.addWidget(self.cat_filter)
+
+        fbar.addWidget(QLabel("Status:"))
+        self.status_filter = QComboBox()
+        self.status_filter.setMinimumWidth(130)
+        self.status_filter.addItems(["All", "Active", "Pending Listing", "Sold", "Unlisted"])
+        self.status_filter.currentTextChanged.connect(self._apply_filter)
+        fbar.addWidget(self.status_filter)
 
         self._hide_unlisted_btn = QPushButton("Hide Unlisted")
         self._hide_unlisted_btn.setCheckable(True)
@@ -329,6 +355,7 @@ class InventoryView(QWidget):
         search        = self.search_box.text().lower()
         platform      = self.plat_filter.currentText()
         category      = self.cat_filter.currentText()
+        status_sel    = self.status_filter.currentText()
         hide_unlisted = self._hide_unlisted_btn.isChecked()
 
         rows = self._all_items
@@ -340,6 +367,8 @@ class InventoryView(QWidget):
             rows = [i for i in rows if platform.lower() in (i.get("platforms") or "").lower()]
         if category != "All":
             rows = [i for i in rows if i.get("category", "") == category]
+        if status_sel != "All":
+            rows = [i for i in rows if _item_status_label(i) == status_sel]
         if hide_unlisted:
             rows = [i for i in rows
                     if (i.get("listing_count") or 0) + (i.get("sold_count") or 0) > 0]
@@ -375,10 +404,13 @@ class InventoryView(QWidget):
 
             active_count = item.get("listing_count", 0) or 0
             sold_count   = item.get("sold_count", 0) or 0
+            # Build detailed cell text (count-aware) — filter uses _item_status_label
             if active_count:
                 status = f"{active_count} active"
             elif sold_count:
                 status = f"Sold ({sold_count})"
+            elif item.get("item_status") == "pending":
+                status = "⏳ Pending"
             else:
                 status = "Unlisted"
 

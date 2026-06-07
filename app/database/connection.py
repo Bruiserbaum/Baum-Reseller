@@ -115,6 +115,26 @@ MIGRATIONS = [
     "ALTER TABLE sales ADD COLUMN ext_listing_id TEXT DEFAULT ''",
     # Index to make the dupe-check fast
     "CREATE INDEX IF NOT EXISTS idx_sales_ext ON sales(item_id, platform, ext_listing_id)",
+    # Pending-listing workflow: track whether an item is waiting to be listed
+    # Values: 'active' (default/normal) | 'pending' (acquired, not yet listed)
+    "ALTER TABLE items ADD COLUMN item_status TEXT DEFAULT 'active'",
+    # Backfill: auto-convert existing sold listings → sales records.
+    # Runs every startup but is idempotent (NOT EXISTS prevents duplication).
+    """INSERT INTO sales
+           (item_id, platform, sale_price, platform_fees, shipping_cost, sale_date, ext_listing_id)
+       SELECT l.item_id, l.platform, l.sold_price, 0, 0,
+              CASE WHEN l.sold_date IS NOT NULL AND l.sold_date != ''
+                   THEN l.sold_date ELSE date('now') END,
+              l.listing_id
+       FROM listings l
+       WHERE l.status = 'sold'
+         AND l.sold_price > 0
+         AND NOT EXISTS (
+             SELECT 1 FROM sales s
+             WHERE s.item_id = l.item_id
+               AND s.platform = l.platform
+               AND s.ext_listing_id = l.listing_id
+         )""",
 ]
 
 

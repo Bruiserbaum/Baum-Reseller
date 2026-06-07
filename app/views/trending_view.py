@@ -10,13 +10,15 @@ from PySide6.QtWidgets import (
     QProgressBar, QScrollArea, QFrame, QSizePolicy, QGridLayout,
     QMessageBox
 )
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QCursor
 
 from app.utils.qt_thread import post_to_main
 
 
 class TrendingView(QWidget):
+    trending_updated = Signal()   # emitted when a fresh fetch completes
+
     def __init__(self):
         super().__init__()
         self._fetching = False
@@ -103,10 +105,13 @@ class TrendingView(QWidget):
         if self._fetching:
             return
 
-        # Warn if no API key is configured
-        from app.services.anthropic_key import has_key
-        if not has_key():
-            from PySide6.QtWidgets import QMessageBox
+        # ── Fetch the API key on the main thread now ──────────────────────
+        # keyring calls can block waiting for a Windows Credential Manager
+        # dialog; doing it here (before spawning the thread) avoids the hang.
+        from app.services.anthropic_key import has_key, get_key
+        api_key: str | None = get_key() if has_key() else None
+
+        if not api_key:
             reply = QMessageBox.question(
                 self, "No Anthropic API Key",
                 "AI-powered trending insights require an Anthropic API key.\n\n"
@@ -120,16 +125,20 @@ class TrendingView(QWidget):
         self._fetching = True
         self._refresh_btn.setEnabled(False)
         self._progress.show()
-        self._status_lbl.setText("Fetching trending data…")
+        self._status_lbl.setText(
+            "Contacting Anthropic API…" if api_key else "Fetching from eBay…"
+        )
+
+        def _progress(msg: str):
+            post_to_main(lambda m=msg: self._status_lbl.setText(m))
 
         def _run():
-            from app.services.trending_service import fetch_trending, get_cache_age_str
+            from app.services.trending_service import fetch_trending
             try:
                 data = fetch_trending(
                     force=True,
-                    progress_cb=lambda msg: post_to_main(
-                        lambda m=msg: self._status_lbl.setText(m)
-                    ),
+                    api_key=api_key,
+                    progress_cb=_progress,
                 )
                 post_to_main(lambda: self._on_fetch_done(data))
             except Exception as exc:
@@ -159,6 +168,7 @@ class TrendingView(QWidget):
                 "updated weekly. Add an Anthropic API key in Settings for AI insights."
             )
         self._render(data)
+        self.trending_updated.emit()
 
     def _on_fetch_error(self, error: str):
         self._fetching = False

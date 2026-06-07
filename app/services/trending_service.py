@@ -184,7 +184,7 @@ def _fetch_with_claude(api_key: str, progress_cb=None) -> dict:
         try:
             message = client.messages.create(
                 model=model,
-                max_tokens=1024,
+                max_tokens=4096,
                 messages=[{"role": "user", "content": prompt}],
             )
             used_model = model
