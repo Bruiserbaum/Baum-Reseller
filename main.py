@@ -120,17 +120,20 @@ def _install_playwright_browsers() -> tuple[bool, str]:
     env["PLAYWRIGHT_BROWSERS_PATH"] = _PLAYWRIGHT_BROWSERS
 
     if getattr(sys, "frozen", False):
-        # PyInstaller bundle: use the playwright.exe driver bundled in _internal
+        # PyInstaller COLLECT bundle layout:
+        #   {exe_dir}/_internal/playwright/driver/node.exe   ← Node.js runtime
+        #   {exe_dir}/_internal/playwright/driver/package/cli.js  ← playwright CLI
         internal = os.path.join(os.path.dirname(sys.executable), "_internal")
-        driver = os.path.join(internal, "playwright", "driver", "playwright.exe")
-        if not os.path.exists(driver):
-            return False, f"Playwright driver not found: {driver}"
-        cmd = [driver, "install", "chromium"]
+        node_exe = os.path.join(internal, "playwright", "driver", "node.exe")
+        cli_js   = os.path.join(internal, "playwright", "driver", "package", "cli.js")
+        if not os.path.exists(node_exe):
+            return False, f"Playwright driver not found: {node_exe}"
+        cmd = [node_exe, cli_js, "install", "chromium"]
     else:
         # Development: use the installed playwright package
         cmd = [sys.executable, "-m", "playwright", "install", "chromium"]
 
-    result = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=300)
+    result = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=600)
     if result.returncode == 0:
         return True, "Chromium installed."
     return False, (result.stderr or result.stdout or "Unknown error").strip()

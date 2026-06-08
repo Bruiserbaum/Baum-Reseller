@@ -59,6 +59,7 @@ class SyncView(QWidget):
             last = get_setting(f"last_sync_{platform}", "")
             row["last_lbl"].setText(f"Last synced: {last}" if last else "Never synced")
         self._refresh_background_status()
+        self._refresh_browser_banner()
 
     # ── UI construction ───────────────────────────────────────────────────
 
@@ -93,6 +94,33 @@ class SyncView(QWidget):
         logs_btn.clicked.connect(self._show_sync_logs)
         header.addWidget(logs_btn)
         layout.addLayout(header)
+
+        # ── Browser install banner (hidden when browser is present) ──────────
+        self._browser_banner = QLabel(
+            "⚠  <b>Browser components not installed</b> — sync requires a headless "
+            "Chromium download (~150 MB, one-time).  "
+            "Click <b>⬇ Install Browser</b> to set it up automatically."
+        )
+        self._browser_banner.setTextFormat(Qt.RichText)
+        self._browser_banner.setWordWrap(True)
+        self._browser_banner.setStyleSheet(
+            "color: #f38ba8; background: #2a1e2e; border-left: 4px solid #f38ba8; "
+            "border-radius: 4px; padding: 10px; font-size: 12px;"
+        )
+        layout.addWidget(self._browser_banner)
+
+        self._install_browser_btn = QPushButton("⬇ Install Browser")
+        self._install_browser_btn.setObjectName("primaryButton")
+        self._install_browser_btn.setFixedWidth(180)
+        self._install_browser_btn.clicked.connect(self._install_browser)
+        layout.addWidget(self._install_browser_btn)
+
+        self._browser_install_status = QLabel("")
+        self._browser_install_status.setStyleSheet("color: #a6adc8; font-size: 11px;")
+        layout.addWidget(self._browser_install_status)
+
+        # Initially hide banner+button if browser is already installed
+        self._refresh_browser_banner()
 
         # ── Progress + status ─────────────────────────────────────────────
         self._progress = QProgressBar()
@@ -685,6 +713,50 @@ class SyncView(QWidget):
             done_cb=lambda ok, count, err:
                 post_to_main(lambda: self._on_sync_done(platform, ok, count, err))
         )
+
+    # ── Browser installation ──────────────────────────────────────────────────
+
+    def _refresh_browser_banner(self):
+        """Show or hide the browser-not-installed banner."""
+        from app.utils.browser import chromium_is_installed
+        installed = chromium_is_installed()
+        self._browser_banner.setVisible(not installed)
+        self._install_browser_btn.setVisible(not installed)
+        self._browser_install_status.setVisible(not installed)
+
+    def _install_browser(self):
+        """Download and install Playwright Chromium in a background thread."""
+        self._install_browser_btn.setEnabled(False)
+        self._browser_install_status.setText("Downloading browser (100–200 MB)…")
+        self._progress.setRange(0, 0)   # indeterminate
+        self._progress.show()
+
+        def _worker():
+            from app.utils.browser import ensure_playwright_browsers
+            ok, msg = ensure_playwright_browsers(
+                progress_cb=lambda m: post_to_main(
+                    lambda: self._browser_install_status.setText(m)
+                )
+            )
+            post_to_main(lambda: self._on_browser_installed(ok, msg))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_browser_installed(self, ok: bool, msg: str):
+        self._progress.hide()
+        self._progress.setRange(0, 100)
+        self._install_browser_btn.setEnabled(True)
+        if ok:
+            self._browser_install_status.setText("✓ Browser installed — you can now sync!")
+            self._browser_banner.hide()
+            self._install_browser_btn.hide()
+        else:
+            self._browser_install_status.setText(f"Install failed: {msg}")
+            QMessageBox.critical(
+                self, "Browser Install Failed",
+                f"Could not download the browser:\n\n{msg}\n\n"
+                "Check your internet connection and try again."
+            )
 
     def _force_sync_all(self):
         if self._syncing:

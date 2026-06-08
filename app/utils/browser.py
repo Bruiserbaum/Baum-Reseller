@@ -321,17 +321,83 @@ def import_cookies_from_file(file_path: str, state_file: str) -> tuple[bool, str
     return True, f"Imported {len(cookies)} cookies from file."
 
 
+# ── Browser installation helper ───────────────────────────────────────────
+
+def chromium_is_installed() -> bool:
+    """Return True if a Playwright Chromium binary is present in PLAYWRIGHT_BROWSERS_PATH."""
+    import glob
+    browsers_dir = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
+    if not browsers_dir or not os.path.isdir(browsers_dir):
+        return False
+    patterns = [
+        os.path.join(browsers_dir, "chromium*", "**", "chrome.exe"),
+        os.path.join(browsers_dir, "chromium*", "**", "chrome-headless-shell.exe"),
+        os.path.join(browsers_dir, "chromium*", "**", "chromium.exe"),
+    ]
+    return any(glob.glob(p, recursive=True) for p in patterns)
+
+
+def ensure_playwright_browsers(progress_cb=None) -> tuple[bool, str]:
+    """
+    Install Playwright's Chromium browser into PLAYWRIGHT_BROWSERS_PATH.
+    Safe to call multiple times — no-op if already installed.
+    progress_cb(msg: str) is called with status text if provided.
+    Returns (success, message).
+    """
+    import subprocess
+
+    browsers_dir = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
+    env = os.environ.copy()
+
+    if getattr(sys, "frozen", False):
+        internal = os.path.join(os.path.dirname(sys.executable), "_internal")
+        node_exe = os.path.join(internal, "playwright", "driver", "node.exe")
+        cli_js   = os.path.join(internal, "playwright", "driver", "package", "cli.js")
+        if not os.path.exists(node_exe):
+            return False, f"Playwright driver not found at:\n{node_exe}"
+        cmd = [node_exe, cli_js, "install", "chromium"]
+    else:
+        cmd = [sys.executable, "-m", "playwright", "install", "chromium"]
+
+    if progress_cb:
+        progress_cb("Downloading browser (100–200 MB, please wait)…")
+
+    try:
+        result = subprocess.run(
+            cmd, env=env, capture_output=True, text=True, timeout=600
+        )
+    except subprocess.TimeoutExpired:
+        return False, "Browser download timed out (10 min). Check your internet connection."
+    except Exception as e:
+        return False, str(e)
+
+    if result.returncode == 0:
+        return True, "Browser installed successfully."
+    return False, (result.stderr or result.stdout or "Unknown error").strip()
+
+
 # ── Headless sync context ─────────────────────────────────────────────────
 
 def headless_context(playwright, state_file: str):
     """
     Return (browser, context) for headless scraping using saved session cookies.
     Caller must call browser.close() when done.
+    Raises RuntimeError with a clear message if Chromium is not installed.
     """
-    browser = playwright.chromium.launch(
-        headless=True,
-        args=["--no-sandbox", "--disable-dev-shm-usage"],
-    )
+    try:
+        browser = playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+    except Exception as e:
+        msg = str(e)
+        if "executable" in msg.lower() or "doesn't exist" in msg.lower():
+            raise RuntimeError(
+                "Browser not installed.\n\n"
+                "Go to the Sync tab and click '⬇ Install Browser' "
+                "to download Chromium (100–200 MB, one-time setup)."
+            ) from e
+        raise
     ctx = browser.new_context(
         storage_state=state_file,
         user_agent=_USER_AGENT,
