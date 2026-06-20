@@ -67,6 +67,7 @@ class SyncView(QWidget):
         scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.NoFrame)
+        self._scroll = scroll
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -97,9 +98,9 @@ class SyncView(QWidget):
 
         # ── Browser install banner (hidden when browser is present) ──────────
         self._browser_banner = QLabel(
-            "⚠  <b>Browser components not installed</b> — sync requires a headless "
-            "Chromium download (~150 MB, one-time).  "
-            "Click <b>⬇ Install Browser</b> to set it up automatically."
+            "⚠  <b>Browser not available</b> — sync requires Playwright Chromium "
+            "(~150 MB, one-time download).  "
+            "Click <b>⬇ Install Browser</b> below to set it up, or reinstall if sync keeps failing."
         )
         self._browser_banner.setTextFormat(Qt.RichText)
         self._browser_banner.setWordWrap(True)
@@ -737,6 +738,13 @@ class SyncView(QWidget):
         self._install_browser_btn.setVisible(not installed)
         self._browser_install_status.setVisible(not installed)
 
+    def _force_browser_banner(self):
+        """Show the install banner and scroll to top (called after a browser-missing sync error)."""
+        self._browser_banner.show()
+        self._install_browser_btn.show()
+        self._browser_install_status.show()
+        self._scroll.verticalScrollBar().setValue(0)
+
     def _install_browser(self):
         """Download and install Playwright Chromium in a background thread."""
         self._install_browser_btn.setEnabled(False)
@@ -803,6 +811,8 @@ class SyncView(QWidget):
             self.sync_completed.emit()
         else:
             self._status_lbl.setText(f"Sync error: {err}")
+            if err and "browser not installed" in err.lower():
+                self._force_browser_banner()
             QMessageBox.warning(self, "Sync Error", f"Sync failed:\n\n{err}")
 
     @staticmethod
@@ -895,6 +905,8 @@ class SyncView(QWidget):
             self._status_lbl.setText(
                 f"Sync complete: {total} listing(s). {len(errors)} error(s)."
             )
+            if any("browser not installed" in e.lower() for e in errors):
+                self._force_browser_banner()
             QMessageBox.warning(
                 self, "Sync Complete with Errors",
                 f"{total} listing(s) synced.\n\nErrors:\n" + "\n".join(errors)
