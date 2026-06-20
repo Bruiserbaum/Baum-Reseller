@@ -232,6 +232,47 @@ QWidget#imagePanel {
     border-right: 1px solid #313244;
 }
 
+/* ── Gear button (Settings, bottom of sidebar) ───────────────────────── */
+QPushButton#gearButton {
+    background: transparent;
+    border: none;
+    border-top: 1px solid #313244;
+    color: #585b70;
+    font-size: 13px;
+    text-align: left;
+    padding: 12px 24px;
+}
+QPushButton#gearButton:hover {
+    background-color: #313244;
+    color: #a6adc8;
+}
+QPushButton#gearButton:checked {
+    background-color: #313244;
+    color: #cba6f7;
+    border-left: 3px solid #cba6f7;
+    border-top: 1px solid #313244;
+}
+
+/* ── Info button (ℹ icon inside group headers) ───────────────────────── */
+QPushButton#infoButton {
+    background: transparent;
+    border: 1px solid #45475a;
+    border-radius: 10px;
+    color: #585b70;
+    font-size: 11px;
+    font-weight: bold;
+    padding: 0;
+    min-width: 20px;
+    max-width: 20px;
+    min-height: 20px;
+    max-height: 20px;
+}
+QPushButton#infoButton:hover {
+    background-color: #313244;
+    color: #cdd6f4;
+    border-color: #cba6f7;
+}
+
 /* ── Status bar ──────────────────────────────────────────────────────── */
 QStatusBar {
     background-color: #181825;

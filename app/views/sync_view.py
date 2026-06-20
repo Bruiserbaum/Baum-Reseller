@@ -132,17 +132,30 @@ class SyncView(QWidget):
         self._status_lbl.setStyleSheet("color: #a6adc8; font-size: 12px;")
         layout.addWidget(self._status_lbl)
 
-        # ── Connection note ────────────────────────────────────────────────
-        note = QLabel(
-            "Recommended: click <b>Login (Browser)</b> — a browser window opens, log in normally "
-            "(MFA, Google SSO, and captcha all work), session saves automatically.<br>"
-            "Alternative: log in in your regular browser and click <b>Import Session</b>. "
-            "If that fails (Chrome 127+ App-Bound Encryption), use <b>Import from File</b> "
-            "with the <i>Get cookies.txt LOCALLY</i> Chrome extension."
+        # ── Connection info icon (replaces verbose note) ───────────────────
+        _CONN_HELP = (
+            "Login (Browser) — Recommended.\n"
+            "Opens a Chromium window. Log in however you like (MFA, Google SSO, "
+            "captcha all work). Session saves automatically.\n\n"
+            "Import Session — reads existing cookies from Chrome/Edge/Firefox.\n"
+            "Use this if you prefer not to re-log in.\n\n"
+            "Import from File — if Import Session fails due to Chrome 127+ "
+            "App-Bound Encryption:\n"
+            "  1. Install 'Get cookies.txt LOCALLY' from the Chrome Web Store\n"
+            "  2. Visit the platform while logged in\n"
+            "  3. Click the extension icon → Export → save the file\n"
+            "  4. Click Import from File… and select it"
         )
-        note.setWordWrap(True)
-        note.setStyleSheet("color: #a6adc8; font-size: 11px;")
-        layout.addWidget(note)
+        conn_info_row = QHBoxLayout()
+        conn_info_row.addStretch()
+        conn_info_btn = QPushButton("ℹ")
+        conn_info_btn.setObjectName("infoButton")
+        conn_info_btn.setToolTip("How to connect platforms")
+        conn_info_btn.clicked.connect(
+            lambda: QMessageBox.information(self, "How to Connect Platforms", _CONN_HELP)
+        )
+        conn_info_row.addWidget(conn_info_btn)
+        layout.addLayout(conn_info_row)
 
         # ── Platform rows (connection + sync combined) ────────────────────
         for platform in PLATFORMS:

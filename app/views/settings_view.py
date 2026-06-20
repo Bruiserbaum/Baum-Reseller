@@ -23,6 +23,15 @@ class SettingsView(QWidget):
         self._build_ui()
         self._load_settings()
 
+    # ── Info button helper ────────────────────────────────────────────────
+
+    def _make_info_btn(self, title: str, body: str) -> QPushButton:
+        btn = QPushButton("ℹ")
+        btn.setObjectName("infoButton")
+        btn.setToolTip(title)
+        btn.clicked.connect(lambda: QMessageBox.information(self, title, body))
+        return btn
+
     def _build_ui(self):
         scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
@@ -59,15 +68,17 @@ class SettingsView(QWidget):
         ai_group = QGroupBox("Trending & AI Insights")
         ai_layout = QVBoxLayout(ai_group)
 
-        ai_note = QLabel(
+        ai_info_row = QHBoxLayout()
+        ai_info_row.addStretch()
+        ai_info_row.addWidget(self._make_info_btn(
+            "About AI Insights",
             "Baum Reseller uses Claude AI (by Anthropic) to generate weekly resale-market "
-            "trend reports. Enter your Anthropic API key below — it is stored securely in "
-            "your system keyring (Windows Credential Manager) and is never written to disk.\n\n"
-            "Get a key at: platform.anthropic.com → API Keys"
-        )
-        ai_note.setWordWrap(True)
-        ai_note.setStyleSheet("color: #a6adc8; font-size: 11px;")
-        ai_layout.addWidget(ai_note)
+            "trend reports.\n\n"
+            "Your API key is stored securely in Windows Credential Manager and is never "
+            "written to disk.\n\n"
+            "Get a free key at: platform.anthropic.com → API Keys"
+        ))
+        ai_layout.addLayout(ai_info_row)
 
         key_row = QHBoxLayout()
         key_row.addWidget(QLabel("API Key:"))
@@ -133,27 +144,27 @@ class SettingsView(QWidget):
 
         layout.addWidget(update_group)
 
-        # ── Backup ────────────────────────────────────────────────────────
-        backup_group = QGroupBox("Backup && Restore")
-        backup_layout = QVBoxLayout(backup_group)
+        # ── Google Drive Backup ───────────────────────────────────────────
+        gdrive_group = QGroupBox("Google Drive Backup")
+        gdrive_layout = QVBoxLayout(gdrive_group)
 
-        gdrive_row = QHBoxLayout()
+        gdrive_hdr = QHBoxLayout()
         self.gdrive_status = QLabel("Google Drive: Not connected")
-        gdrive_row.addWidget(self.gdrive_status)
-        gdrive_row.addStretch()
+        gdrive_hdr.addWidget(self.gdrive_status)
+        gdrive_hdr.addStretch()
         connect_drive_btn = QPushButton("Connect Google Drive")
         connect_drive_btn.clicked.connect(self._connect_gdrive)
-        gdrive_row.addWidget(connect_drive_btn)
-        backup_layout.addLayout(gdrive_row)
-
-        gdrive_hint = QLabel(
-            "Requires a free Google Cloud OAuth2 credentials file. "
-            "Click <b>Connect</b> for step-by-step instructions."
-        )
-        gdrive_hint.setTextFormat(Qt.RichText)
-        gdrive_hint.setWordWrap(True)
-        gdrive_hint.setStyleSheet("color: #6c7086; font-size: 10px; margin-bottom: 4px;")
-        backup_layout.addWidget(gdrive_hint)
+        gdrive_hdr.addWidget(connect_drive_btn)
+        gdrive_hdr.addWidget(self._make_info_btn(
+            "Google Drive Backup",
+            "Requires a free Google Cloud OAuth2 credentials file.\n\n"
+            "How to get it:\n"
+            "  1. Go to console.cloud.google.com → APIs & Services → Credentials\n"
+            "  2. Create Credentials → OAuth 2.0 Client ID → Desktop app\n"
+            "  3. Click Download JSON\n\n"
+            "Then click Connect Google Drive and select the downloaded JSON file."
+        ))
+        gdrive_layout.addLayout(gdrive_hdr)
 
         bk_row = QHBoxLayout()
         self.last_backup_label = QLabel("Last backup: Never")
@@ -163,7 +174,7 @@ class SettingsView(QWidget):
         backup_now_btn.setObjectName("primaryButton")
         backup_now_btn.clicked.connect(self._backup_now)
         bk_row.addWidget(backup_now_btn)
-        backup_layout.addLayout(bk_row)
+        gdrive_layout.addLayout(bk_row)
 
         sched_row = QHBoxLayout()
         sched_row.addWidget(QLabel("Auto-backup:"))
@@ -174,7 +185,28 @@ class SettingsView(QWidget):
         )
         sched_row.addWidget(self.backup_schedule)
         sched_row.addStretch()
-        backup_layout.addLayout(sched_row)
+        gdrive_layout.addLayout(sched_row)
+
+        self.backup_status = QLabel("")
+        gdrive_layout.addWidget(self.backup_status)
+
+        layout.addWidget(gdrive_group)
+
+        # ── Manual Backup ─────────────────────────────────────────────────
+        manual_group = QGroupBox("Manual Backup")
+        manual_layout = QVBoxLayout(manual_group)
+
+        manual_hdr = QHBoxLayout()
+        manual_hdr.addStretch()
+        manual_hdr.addWidget(self._make_info_btn(
+            "Manual Backup / Import",
+            "Export Backup (.zip) — saves a complete snapshot of your database "
+            "and settings to a zip file on your computer. Use this to move data "
+            "to a new machine or keep an offline copy.\n\n"
+            "Import Backup (.zip) — restores from a previously exported zip.\n\n"
+            "WARNING: importing replaces ALL current data. This cannot be undone."
+        ))
+        manual_layout.addLayout(manual_hdr)
 
         io_row = QHBoxLayout()
         export_local_btn = QPushButton("Export Backup (.zip)")
@@ -184,27 +216,27 @@ class SettingsView(QWidget):
         import_local_btn.clicked.connect(self._import_local)
         io_row.addWidget(import_local_btn)
         io_row.addStretch()
-        backup_layout.addLayout(io_row)
+        manual_layout.addLayout(io_row)
 
-        self.backup_status = QLabel("")
-        backup_layout.addWidget(self.backup_status)
+        self.manual_status = QLabel("")
+        manual_layout.addWidget(self.manual_status)
 
-        layout.addWidget(backup_group)
+        layout.addWidget(manual_group)
 
-        # ── Data Location Notice ──────────────────────────────────────────
+        # ── Data location info (compact, bottom of page) ──────────────────
         data_dir = os.path.join(os.path.expanduser("~"), ".baum-reseller")
-        data_notice = QLabel(
-            f"\U0001F512  Your data (database, credentials, browser sessions) is stored at:\n"
-            f"    {data_dir}\n"
-            f"    This folder is NOT modified by app reinstalls or updates — "
-            "your settings are always preserved."
-        )
-        data_notice.setWordWrap(True)
-        data_notice.setStyleSheet(
-            "color: #a6adc8; font-size: 11px; "
-            "background: #252535; border-radius: 6px; padding: 10px;"
-        )
-        layout.addWidget(data_notice)
+        data_row = QHBoxLayout()
+        data_lbl = QLabel("🔒 Data storage location")
+        data_lbl.setStyleSheet("color: #585b70; font-size: 11px;")
+        data_row.addWidget(data_lbl)
+        data_row.addWidget(self._make_info_btn(
+            "Data Storage",
+            f"Your data is stored at:\n\n    {data_dir}\n\n"
+            f"This folder is NOT modified by app reinstalls or updates — "
+            f"your inventory, settings, and credentials are always preserved."
+        ))
+        data_row.addStretch()
+        layout.addLayout(data_row)
         layout.addStretch()
         scroll.setWidget(content)
 

@@ -26,8 +26,10 @@ NAV = [
     ("Import",     "import",      4),
     ("Reports",    "reports",     5),
     ("Alerts",     "alerts",      6),
-    ("Settings",   "settings",    7),
 ]
+
+# Settings lives at stack index 7 but is opened via the gear icon, not a nav button
+_SETTINGS_INDEX = 7
 
 _GITHUB_REPO = "Bruiserbaum/Baum-Reseller"
 _UPDATE_CHECK_INTERVAL_MS = 10 * 60 * 1000   # 10 minutes
@@ -186,6 +188,13 @@ class MainWindow(QMainWindow):
 
         layout.addStretch()
 
+        # Gear icon — opens Settings (bottom of sidebar, not a main nav item)
+        self._gear_btn = QPushButton("⚙  Settings")
+        self._gear_btn.setObjectName("gearButton")
+        self._gear_btn.setCheckable(True)
+        self._gear_btn.clicked.connect(lambda: self._activate("settings"))
+        layout.addWidget(self._gear_btn)
+
         ver = QLabel(f"v{VERSION}")
         ver.setObjectName("versionLabel")
         ver.setAlignment(Qt.AlignCenter)
@@ -194,10 +203,12 @@ class MainWindow(QMainWindow):
         return sidebar
 
     def _activate(self, name: str):
-        idx = {n: i for _, n, i in NAV}
-        self.stack.setCurrentIndex(idx[name])
+        _idx = {n: i for _, n, i in NAV}
+        _idx["settings"] = _SETTINGS_INDEX
+        self.stack.setCurrentIndex(_idx[name])
         for n, btn in self._nav_btns.items():
             btn.setChecked(n == name)
+        self._gear_btn.setChecked(name == "settings")
         if name == "inventory":
             self.inventory_view.lazy_refresh()
         elif name == "containers":

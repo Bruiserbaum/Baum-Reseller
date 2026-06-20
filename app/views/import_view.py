@@ -4,7 +4,7 @@ import threading
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QProgressBar, QTableWidget, QTableWidgetItem, QHeaderView,
-    QScrollArea, QFileDialog, QMessageBox, QFrame
+    QScrollArea, QFileDialog, QMessageBox, QFrame,
 )
 from PySide6.QtCore import Qt, Signal
 
@@ -40,14 +40,24 @@ class ImportView(QWidget):
         title.setObjectName("pageTitle")
         layout.addWidget(title)
 
-        desc = QLabel(
-            "Import historical inventory and sales data from a CSV spreadsheet. "
+        # Info icon replaces the verbose description block
+        _IMPORT_HELP = (
+            "Import historical inventory and sales data from a CSV spreadsheet.\n\n"
             "Each row represents one listing. Download the template to see the exact "
-            "column format, fill it in with your data, then import it below."
+            "column format, fill it in with your data, then import it below.\n\n"
+            "Tip: the template includes example rows — delete them before importing "
+            "your real data."
         )
-        desc.setWordWrap(True)
-        desc.setStyleSheet("color: #a6adc8;")
-        layout.addWidget(desc)
+        import_info_row = QHBoxLayout()
+        import_info_row.addStretch()
+        import_info_btn = QPushButton("ℹ")
+        import_info_btn.setObjectName("infoButton")
+        import_info_btn.setToolTip("How to use CSV import")
+        import_info_btn.clicked.connect(
+            lambda: QMessageBox.information(self, "About CSV Import", _IMPORT_HELP)
+        )
+        import_info_row.addWidget(import_info_btn)
+        layout.addLayout(import_info_row)
 
         # ── Template section ──────────────────────────────────────────────
         tmpl_frame = QFrame()
