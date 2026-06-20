@@ -18,16 +18,17 @@ from app.utils.qt_thread import post_to_main
 from app.views.item_detail_view import ItemDetailDialog
 
 # ── Column layout ─────────────────────────────────────────────────────────────
-_THUMB_COL = 0    # thumbnail (Fixed, non-resizable)
-_TITLE_COL = 1    # title     (Interactive, auto-fills remaining space)
+_CHECK_COL = 0    # checkbox  (Fixed 28px)
+_THUMB_COL = 1    # thumbnail (Fixed, non-resizable)
+_TITLE_COL = 2    # title     (Interactive, auto-fills remaining space)
 _THUMB_W   = 60   # thumbnail column width in px
 _ROW_H     = 58   # row height in px
 
-# Starting widths for columns 2-9
-#  2:Platforms  3:Bin  4:Category  5:Cost  6:Listed  7:Days  8:Status  9:Desc
+# Starting widths for columns 3-10
+#  3:Platforms  4:Bin  5:Category  6:Cost  7:Listed  8:Days  9:Status  10:Desc
 _COL_WIDTHS = [110, 60, 140, 70, 90, 60, 80, 200]
 
-_CATEGORY_COL = 4    # absolute column index for "Category"
+_CATEGORY_COL = 5    # absolute column index for "Category"
 _CAT_MIN_W    = 120  # Category column will never shrink below this many px
 
 # Thread pool caps concurrent image downloads at 8; daemon threads won't block exit
@@ -188,6 +189,14 @@ class InventoryView(QWidget):
         self._dedup_btn.clicked.connect(self._run_dedup)
         fbar.addWidget(self._dedup_btn)
 
+        self._merge_btn = QPushButton("Merge Selected")
+        self._merge_btn.setEnabled(False)
+        self._merge_btn.setToolTip(
+            "Check 2 or more items using the ✓ column, then click to merge them into one record"
+        )
+        self._merge_btn.clicked.connect(self._merge_selected)
+        fbar.addWidget(self._merge_btn)
+
         self.count_label = QLabel("0 items")
         fbar.addWidget(self.count_label)
         root.addLayout(fbar)
@@ -235,28 +244,31 @@ class InventoryView(QWidget):
         tp_layout.setSpacing(0)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(10)
+        self.table.setColumnCount(11)
         self.table.setHorizontalHeaderLabels([
-            "",            # 0: Thumbnail
-            "Title",       # 1: auto-stretch
-            "Platforms",   # 2
-            "Bin",         # 3
-            "Category",    # 4
-            "Cost",        # 5
-            "Listed",      # 6
-            "Days",        # 7
-            "Status",      # 8
-            "Description", # 9
+            "✓",           # 0: checkbox
+            "",            # 1: Thumbnail
+            "Title",       # 2: auto-stretch
+            "Platforms",   # 3
+            "Bin",         # 4
+            "Category",    # 5
+            "Cost",        # 6
+            "Listed",      # 7
+            "Days",        # 8
+            "Status",      # 9
+            "Description", # 10
         ])
 
         hdr = self.table.horizontalHeader()
-        hdr.setSectionResizeMode(QHeaderView.Interactive)           # all draggable…
-        hdr.setSectionResizeMode(_THUMB_COL, QHeaderView.Fixed)    # …except thumbnail
+        hdr.setSectionResizeMode(QHeaderView.Interactive)
+        hdr.setSectionResizeMode(_CHECK_COL, QHeaderView.Fixed)
+        hdr.setSectionResizeMode(_THUMB_COL, QHeaderView.Fixed)
         hdr.setStretchLastSection(False)
-        hdr.setMinimumSectionSize(40)
+        hdr.setMinimumSectionSize(28)
 
+        self.table.setColumnWidth(_CHECK_COL, 28)
         self.table.setColumnWidth(_THUMB_COL, _THUMB_W)
-        for col, w in enumerate(_COL_WIDTHS, start=2):
+        for col, w in enumerate(_COL_WIDTHS, start=3):
             self.table.setColumnWidth(col, w)
 
         hdr.sectionResized.connect(self._on_col_resized)
@@ -271,6 +283,7 @@ class InventoryView(QWidget):
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
         self.table.doubleClicked.connect(self._open_item)
+        self.table.itemChanged.connect(self._on_item_changed)
         tp_layout.addWidget(self.table)
 
         self._stack.addWidget(table_page)    # index 1
@@ -375,6 +388,7 @@ class InventoryView(QWidget):
         self._render(rows)
 
     def _render(self, items: list[dict]):
+        self.table.blockSignals(True)
         self.table.setSortingEnabled(False)
         self.table.setUpdatesEnabled(False)
         self.table.setRowCount(len(items))
@@ -384,7 +398,14 @@ class InventoryView(QWidget):
         for row, item in enumerate(items):
             item_id = item.get("id")
 
-            # ── Col 0: Thumbnail ─────────────────────────────────────────
+            # ── Col 0: Checkbox ──────────────────────────────────────────
+            check = QTableWidgetItem()
+            check.setData(Qt.UserRole, item_id)
+            check.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+            check.setCheckState(Qt.Unchecked)
+            self.table.setItem(row, _CHECK_COL, check)
+
+            # ── Col 1: Thumbnail ─────────────────────────────────────────
             thumb = QTableWidgetItem()
             thumb.setData(Qt.UserRole, item_id)
             thumb.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
@@ -424,14 +445,14 @@ class InventoryView(QWidget):
 
             text_cells = [
                 (_TITLE_COL, title_text),
-                (2, platform_str),
-                (3, item.get("bin_location") or ""),
-                (4, item.get("category") or ""),
-                (5, f"${(item.get('purchase_cost') or 0):.2f}"),
-                (6, _format_date(first_listed)),
-                (7, _days_listed_str(first_listed)),
-                (8, status),
-                (9, desc_short),
+                (3, platform_str),
+                (4, item.get("bin_location") or ""),
+                (5, item.get("category") or ""),
+                (6, f"${(item.get('purchase_cost') or 0):.2f}"),
+                (7, _format_date(first_listed)),
+                (8, _days_listed_str(first_listed)),
+                (9, status),
+                (10, desc_short),
             ]
             for col, text in text_cells:
                 cell = QTableWidgetItem(str(text))
@@ -442,7 +463,9 @@ class InventoryView(QWidget):
 
         self.table.setUpdatesEnabled(True)
         self.table.setSortingEnabled(True)
+        self.table.blockSignals(False)
         self.count_label.setText(f"{len(items)} item{'s' if len(items) != 1 else ''}")
+        self._update_merge_btn()
         QTimer.singleShot(0, self._fit_title_col)
 
     # ── Image loading ─────────────────────────────────────────────────────
@@ -511,6 +534,35 @@ class InventoryView(QWidget):
                 dlg = ItemDetailDialog(item_id, parent=self)
                 if dlg.exec():
                     self.refresh()
+
+    # ── Checkbox / merge helpers ──────────────────────────────────────────────
+
+    def _on_item_changed(self, item: QTableWidgetItem):
+        if item.column() == _CHECK_COL:
+            self._update_merge_btn()
+
+    def _update_merge_btn(self):
+        count = sum(
+            1 for row in range(self.table.rowCount())
+            if (c := self.table.item(row, _CHECK_COL)) and c.checkState() == Qt.Checked
+        )
+        self._merge_btn.setEnabled(count >= 2)
+        self._merge_btn.setText(f"Merge {count} Selected" if count >= 2 else "Merge Selected")
+
+    def _merge_selected(self):
+        ids = [
+            self.table.item(row, _CHECK_COL).data(Qt.UserRole)
+            for row in range(self.table.rowCount())
+            if (c := self.table.item(row, _CHECK_COL)) and c.checkState() == Qt.Checked
+        ]
+        if len(ids) < 2:
+            return
+        items_to_merge = [i for i in self._all_items if i["id"] in set(ids)]
+        if len(items_to_merge) < 2:
+            return
+        dlg = ManualMergeDialog(items_to_merge, parent=self)
+        if dlg.exec():
+            self.refresh()
 
     # ── Deduplication ─────────────────────────────────────────────────────────
 
@@ -660,3 +712,136 @@ class DuplicatesDialog(QDialog):
                 frame.hide()
             except Exception as exc:
                 QMessageBox.critical(self, "Merge Failed", str(exc))
+
+
+# ── Manual merge dialog ───────────────────────────────────────────────────────
+
+class ManualMergeDialog(QDialog):
+    """
+    Shown when the user manually selects items to merge via checkboxes.
+    Lets them pick the primary item and warns about per-platform listing conflicts.
+    """
+
+    def __init__(self, items: list[dict], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Merge {len(items)} Items")
+        self.setMinimumSize(720, 460)
+        self._items = items
+        self._primary_id = items[0]["id"]
+        self._build_ui()
+
+    def _build_ui(self):
+        from PySide6.QtWidgets import (
+            QRadioButton, QButtonGroup, QGroupBox, QDialogButtonBox,
+        )
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        info = QLabel(
+            "Choose the <b>primary item</b> to keep. "
+            "All other items' listings, images, and sales will be moved into it, "
+            "then those items will be deleted."
+        )
+        info.setWordWrap(True)
+        info.setTextFormat(Qt.RichText)
+        layout.addWidget(info)
+
+        group_box = QGroupBox("Select primary item")
+        gbl = QVBoxLayout(group_box)
+        gbl.setSpacing(8)
+        self._btn_group = QButtonGroup(self)
+
+        for idx, item in enumerate(self._items):
+            plats   = (item.get("platforms") or "—").replace(",", " | ")
+            cost    = f"${float(item.get('purchase_cost') or 0):.2f}"
+            listing = item.get("listing_count") or 0
+            radio = QRadioButton(
+                f"{item.get('title', 'Unknown')[:80]}\n"
+                f"  Platforms: {plats}   Cost: {cost}   Active listings: {listing}"
+            )
+            radio.setChecked(idx == 0)
+            item_id = item["id"]
+            radio.toggled.connect(
+                lambda checked, iid=item_id: self._on_primary_changed(checked, iid)
+            )
+            self._btn_group.addButton(radio)
+            gbl.addWidget(radio)
+
+        layout.addWidget(group_box)
+
+        # Conflict warning (shown when multiple items share a platform)
+        self._conflict_lbl = QLabel()
+        self._conflict_lbl.setWordWrap(True)
+        self._conflict_lbl.setTextFormat(Qt.RichText)
+        self._conflict_lbl.setStyleSheet(
+            "color: #f9e2af; background: #2a2818; "
+            "border-left: 4px solid #f9e2af; border-radius: 4px; padding: 8px;"
+        )
+        self._conflict_lbl.hide()
+        layout.addWidget(self._conflict_lbl)
+
+        layout.addStretch()
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.button(QDialogButtonBox.Ok).setText("Merge")
+        btns.accepted.connect(self._do_merge)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+        self._check_conflicts()
+
+    def _on_primary_changed(self, checked: bool, item_id: int):
+        if checked:
+            self._primary_id = item_id
+            self._check_conflicts()
+
+    def _check_conflicts(self):
+        from app.database.connection import get_connection
+        from collections import defaultdict
+        ids = [i["id"] for i in self._items]
+        placeholders = ",".join("?" * len(ids))
+        with get_connection() as conn:
+            rows = conn.execute(
+                f"SELECT item_id, platform, listing_id FROM listings WHERE item_id IN ({placeholders})",
+                ids,
+            ).fetchall()
+
+        by_platform: dict[str, list] = defaultdict(list)
+        for row in rows:
+            by_platform[row["platform"]].append((row["item_id"], row["listing_id"] or "—"))
+
+        conflicts = {
+            plat: entries
+            for plat, entries in by_platform.items()
+            if len({e[0] for e in entries}) > 1
+        }
+
+        if conflicts:
+            lines = []
+            for plat, entries in sorted(conflicts.items()):
+                ids_str = ", ".join(
+                    f"ID {e[1]}" for e in entries if e[0] != self._primary_id
+                ) or "unknown"
+                lines.append(
+                    f"• <b>{plat.capitalize()}</b>: "
+                    f"secondary item has listing(s): {ids_str}"
+                )
+            self._conflict_lbl.setText(
+                "⚠  <b>Listing conflicts</b> — both items have listings on the same platform:<br>"
+                + "<br>".join(lines)
+                + "<br><br>After merging, the primary item will have <i>all</i> these listings. "
+                "Visit the platform to remove any duplicates if needed."
+            )
+            self._conflict_lbl.show()
+        else:
+            self._conflict_lbl.hide()
+
+    def _do_merge(self):
+        from app.services.dedup_service import merge
+        other_ids = [i["id"] for i in self._items if i["id"] != self._primary_id]
+        try:
+            for other_id in other_ids:
+                merge(self._primary_id, other_id)
+            self.accept()
+        except Exception as exc:
+            QMessageBox.critical(self, "Merge Failed", str(exc))

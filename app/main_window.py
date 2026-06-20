@@ -212,7 +212,7 @@ class MainWindow(QMainWindow):
         if name == "inventory":
             self.inventory_view.lazy_refresh()
         elif name == "containers":
-            self.containers_view.lazy_refresh()
+            self.containers_view.refresh()
         elif name == "sync":
             self.sync_view.refresh()
         elif name == "alerts":
