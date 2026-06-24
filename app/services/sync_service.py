@@ -51,10 +51,14 @@ def sync_platform(platform: str, progress_cb=None, done_cb=None):
 
 
 def sync_all(progress_cb=None, done_cb=None):
-    """Sync all platforms sequentially in a background thread."""
+    """Sync all platforms sequentially in a background thread.
+
+    done_cb(counts: dict[str, int], errors: list[str])
+      counts maps platform → listings fetched (-1 if that platform errored).
+    """
     def _worker():
-        total = 0
-        errors = []
+        counts: dict[str, int] = {}
+        errors: list[str] = []
         for p in PLATFORMS:
             try:
                 svc = _get_service(p)
@@ -65,15 +69,16 @@ def sync_all(progress_cb=None, done_cb=None):
                     except Exception:
                         pass
                 _persist_listings(p, listings)
-                total += len(listings)
+                counts[p] = len(listings)
                 ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
                 set_setting(f"last_sync_{p}", ts)
             except Exception as e:
-                errors.append(f"{p}: {e}")
+                counts[p] = -1
+                errors.append(f"{p.capitalize()}: {e}")
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
         set_setting("last_sync_time", ts)
         if done_cb:
-            done_cb(total, errors)
+            done_cb(counts, errors)
 
     threading.Thread(target=_worker, daemon=True).start()
 

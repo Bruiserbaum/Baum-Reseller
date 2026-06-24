@@ -130,6 +130,8 @@ class SyncView(QWidget):
         layout.addWidget(self._progress)
 
         self._status_lbl = QLabel("")
+        self._status_lbl.setTextFormat(Qt.RichText)
+        self._status_lbl.setWordWrap(True)
         self._status_lbl.setStyleSheet("color: #a6adc8; font-size: 12px;")
         layout.addWidget(self._status_lbl)
 
@@ -792,8 +794,8 @@ class SyncView(QWidget):
 
         sync_all(
             progress_cb=_progress,
-            done_cb=lambda total, errors:
-                post_to_main(lambda: self._on_all_done(total, errors))
+            done_cb=lambda counts, errors:
+                post_to_main(lambda: self._on_all_done(counts, errors))
         )
 
     def _on_sync_done(self, platform: str, ok: bool, count: int, err: str | None):
@@ -806,7 +808,9 @@ class SyncView(QWidget):
 
             detail = self._debug_summary(platform)
             self._status_lbl.setText(
-                f"Synced {count} listing(s) from {PLATFORM_DISPLAY[platform]}.{detail}"
+                f"{PLATFORM_DISPLAY[platform]}: "
+                f"<span style='color:#a6e3a1; font-weight:bold;'>{count} listing(s)</span>"
+                f"{detail}"
             )
             self.sync_completed.emit()
         else:
@@ -897,19 +901,37 @@ class SyncView(QWidget):
         layout.addWidget(btns)
         dlg.exec()
 
-    def _on_all_done(self, total: int, errors: list):
+    def _on_all_done(self, counts: dict, errors: list):
         self._set_busy(False)
         self.refresh()
         self.sync_completed.emit()
+
+        # Build per-platform summary with green counts
+        lines = []
+        total = 0
+        for p in ("ebay", "mercari", "poshmark"):
+            n = counts.get(p)
+            if n is None:
+                continue
+            if n >= 0:
+                total += n
+                lines.append(
+                    f"<b>{PLATFORM_DISPLAY[p]}:</b> "
+                    f"<span style='color:#a6e3a1; font-weight:bold;'>{n} listing(s)</span>"
+                )
+            else:
+                lines.append(
+                    f"<b>{PLATFORM_DISPLAY[p]}:</b> "
+                    f"<span style='color:#f38ba8;'>error</span>"
+                )
+
+        summary = "Sync complete &nbsp;— &nbsp;" + " &nbsp;|&nbsp; ".join(lines)
+        self._status_lbl.setText(summary)
+
         if errors:
-            self._status_lbl.setText(
-                f"Sync complete: {total} listing(s). {len(errors)} error(s)."
-            )
             if any("browser not installed" in e.lower() for e in errors):
                 self._force_browser_banner()
             QMessageBox.warning(
                 self, "Sync Complete with Errors",
                 f"{total} listing(s) synced.\n\nErrors:\n" + "\n".join(errors)
             )
-        else:
-            self._status_lbl.setText(f"All platforms synced — {total} listing(s) total.")
