@@ -16,7 +16,8 @@ LOGIN_URL = "https://www.mercari.com/login/"
 HOME_URL  = "https://www.mercari.com/"
 
 _AUTH = ("/login", "/register", "/verify", "/otp", "/two-step", "/2fa",
-         "/confirm", "/auth/", "/signin")
+         "/confirm", "/auth/", "/signin", "/challenge", "/identity",
+         "/account-verification", "/restricted", "/blocked")
 
 
 def _is_logged_in(url: str) -> bool:
@@ -185,6 +186,27 @@ class MercariService:
 
             # Always scrape DOM (XHR alone is unreliable)
             active_dom = _scrape_dom(page, status="active")
+
+            # If the page loaded but has no items, check for a verification wall.
+            # Socure (socure.io) is Mercari's identity-check provider — its presence
+            # with 0 items means the account is blocked behind a verification prompt.
+            if not active_dom:
+                page_src = page.content()
+                verification_wall = (
+                    "socure.io" in page_src
+                    or "identity-verification" in page_src
+                    or "account-verification" in page_src
+                    or any(a in page.url for a in ("/challenge", "/identity", "/restricted"))
+                )
+                if verification_wall:
+                    browser.close()
+                    raise ValueError(
+                        "Mercari requires identity or account verification before syncing.\n\n"
+                        "Please open Mercari in your regular browser, complete any pending "
+                        "verification steps, then try syncing again.\n\n"
+                        "(This is a Mercari account requirement — not a login issue. "
+                        "Your session is still valid.)"
+                    )
 
             if progress_cb:
                 progress_cb("Loading Mercari sold listings…")

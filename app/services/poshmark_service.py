@@ -131,8 +131,41 @@ class PoshmarkService:
         legacy = os.path.join(os.path.expanduser("~"), ".baum-reseller", "poshmark_state.json")
         return legacy if os.path.exists(legacy) else None
 
+    def _get_username_from_session(self) -> str:
+        """Extract username directly from saved session cookies — no page load needed."""
+        session_file = self._get_session_file()
+        if not session_file:
+            return ""
+        try:
+            with open(session_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            for cookie in data.get("cookies", []):
+                name = cookie.get("name", "")
+                if name in ("poshmark_username", "_poshmark_login", "pm_username"):
+                    return cookie.get("value", "").strip()
+        except Exception:
+            pass
+        return ""
+
     def _get_username(self, page) -> str:
-        for selector in ['a[href*="/closet/"]', '[data-et-name="my_closet"]']:
+        # 1. Try session cookies first (most reliable, no DOM dependency)
+        uname = self._get_username_from_session()
+        if uname:
+            return uname
+        # 2. Try __NEXT_DATA__ / embedded JSON
+        try:
+            m = re.search(r'"username"\s*:\s*"([^"]{2,40})"', page.content())
+            if m:
+                return m.group(1)
+        except Exception:
+            pass
+        # 3. DOM selectors
+        for selector in [
+            'a[href*="/closet/"]',
+            '[data-et-name="my_closet"]',
+            '[href*="/closet/"][class*="nav"]',
+            'a[data-testid*="closet"]',
+        ]:
             try:
                 el = page.query_selector(selector)
                 if el:
@@ -142,12 +175,6 @@ class PoshmarkService:
                         return m.group(1)
             except Exception:
                 continue
-        try:
-            m = re.search(r'"username"\s*:\s*"([^"]+)"', page.content())
-            if m:
-                return m.group(1)
-        except Exception:
-            pass
         return ""
 
     def fetch_listings(self, progress_cb=None) -> list[dict]:
@@ -155,14 +182,36 @@ class PoshmarkService:
         if not session_file:
             raise ValueError("Not logged in to Poshmark. Click 'Login with Browser' first.")
 
+        import datetime as _dt
+        import json as _json
         from playwright.sync_api import sync_playwright
         from app.utils.browser import headless_context
+
         intercepted: list[dict] = []
+        xhr_urls: list[str] = []
 
         def _on_response(response):
-            if "vm-rest" in response.url and ("posts" in response.url or "listings" in response.url):
+            url = response.url
+            rtype = response.request.resource_type
+            if rtype not in ("xhr", "fetch"):
+                return
+            xhr_urls.append(url)
+            # Broader filter: any Poshmark API or listing-shaped response
+            is_poshmark_api = (
+                "poshmark.com" in url and (
+                    "vm-rest" in url or
+                    "/api/" in url or
+                    "listings" in url or
+                    "closet" in url or
+                    "posts" in url or
+                    "catalog" in url
+                )
+            )
+            if is_poshmark_api:
                 try:
-                    intercepted.append(response.json())
+                    data = response.json()
+                    if isinstance(data, (dict, list)):
+                        intercepted.append({"url": url, "body": data})
                 except Exception:
                     pass
 
@@ -183,20 +232,26 @@ class PoshmarkService:
             username = self._get_username(page)
             if not username:
                 browser.close()
-                raise ValueError("Could not determine Poshmark username.")
+                raise ValueError(
+                    "Could not determine your Poshmark username.\n\n"
+                    "Try clicking 'Log Out' on the Sync page, then 'Login (Browser)' "
+                    "to refresh your session."
+                )
 
             if progress_cb:
                 progress_cb(f"Loading closet for @{username}…")
 
-            # Poshmark fires continuous analytics/ad pings — use "load" so we
-            # don't wait for networkidle (which never arrives), then let the
-            # SPA settle before we start scraping/intercepting XHR.
             page.goto(f"https://poshmark.com/closet/{username}",
                       wait_until="load", timeout=30_000)
             page.wait_for_timeout(3_000)
             for _ in range(6):
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 page.wait_for_timeout(1_200)
+
+            active_dom = _scrape_dom(page, status="active")
+
+            if progress_cb:
+                progress_cb(f"Loading sold items for @{username}…")
 
             page.goto(f"https://poshmark.com/closet/{username}?availability=sold_out",
                       wait_until="load", timeout=30_000)
@@ -205,9 +260,99 @@ class PoshmarkService:
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 page.wait_for_timeout(1_000)
 
+            sold_dom = _scrape_dom(page, status="sold")
             browser.close()
 
-        return _parse_api_responses(intercepted)
+        api_results = _parse_api_responses([e["body"] for e in intercepted])
+        dom_results = active_dom + sold_dom
+        result = api_results if len(api_results) >= len(dom_results) else dom_results
+
+        # ── Debug log ─────────────────────────────────────────────────────
+        _debug = {
+            "timestamp":              _dt.datetime.now().isoformat(),
+            "platform":               "poshmark",
+            "username":               username,
+            "xhr_responses_captured": len(intercepted),
+            "xhr_urls":               xhr_urls[:20],
+            "xhr_body_top_keys":      [
+                list(e["body"].keys())[:6] if isinstance(e["body"], dict) else []
+                for e in intercepted[:10]
+            ],
+            "xhr_items_parsed":       len(api_results),
+            "dom_active_items":       len(active_dom),
+            "dom_sold_items":         len(sold_dom),
+            "total_returned":         len(result),
+            "sample_items":           result[:3],
+        }
+        _debug_path = os.path.join(
+            os.path.expanduser("~"), ".baum-reseller", "debug_poshmark_sync.json"
+        )
+        try:
+            with open(_debug_path, "w", encoding="utf-8") as _f:
+                _json.dump(_debug, _f, indent=2, default=str)
+        except Exception:
+            pass
+
+        return result
+
+
+def _scrape_dom(page, status: str = "active") -> list[dict]:
+    """
+    Walk every /listing/ link in the page — class-agnostic, survives UI changes.
+    """
+    raw = page.evaluate(r"""
+        () => {
+            const seen = new Set();
+            const results = [];
+            for (const link of document.querySelectorAll('a[href*="/listing/"]')) {
+                const m = link.href.match(/\/listing\/([^/?#]+)/);
+                if (!m) continue;
+                const lid = m[1];
+                if (seen.has(lid) || lid.length < 5) continue;
+                seen.add(lid);
+                const container = link.closest(
+                    '[data-et-name], [class*="listing"], [class*="Listing"], li, article'
+                ) || link;
+                const img   = container.querySelector('img');
+                const price = container.querySelector(
+                    '[class*="price"], [class*="Price"], [data-et-name*="price"]'
+                );
+                const name  = container.querySelector(
+                    '[class*="title"], [class*="Title"], [class*="name"], [class*="Name"]'
+                );
+                let title = name ? name.textContent.trim() : link.textContent.trim();
+                if (!title) title = 'Untitled';
+                results.push({
+                    url:     link.href,
+                    title,
+                    price:   price ? price.textContent.replace(/[^0-9.]/g, '') : '0',
+                    img_url: img ? img.src : '',
+                });
+            }
+            return results;
+        }
+    """)
+    results = []
+    seen: set[str] = set()
+    for item in (raw or []):
+        m = re.search(r"/listing/([^/?#]+)", item.get("url", ""))
+        lid = m.group(1) if m else ""
+        if not lid or lid in seen:
+            continue
+        seen.add(lid)
+        try:
+            price_val = float(item.get("price") or 0)
+        except (ValueError, TypeError):
+            price_val = 0.0
+        results.append({
+            "listing_id": lid,
+            "title":      item.get("title", "Untitled"),
+            "url":        item.get("url", ""),
+            "price":      price_val,
+            "status":     status,
+            "img_url":    item.get("img_url", ""),
+        })
+    return results
 
 
 def _parse_api_responses(responses: list[dict]) -> list[dict]:
