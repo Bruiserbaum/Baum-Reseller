@@ -8,12 +8,13 @@ import re
 import json
 import keyring
 
-SERVICE    = "baum-reseller-poshmark"
-DOMAIN     = "poshmark.com"
-SESSION    = os.path.join(os.path.expanduser("~"), ".baum-reseller", "poshmark_session.json")
-PROFILE    = os.path.join(os.path.expanduser("~"), ".baum-reseller", "poshmark_profile")
-LOGIN_URL  = "https://poshmark.com/login"
-FEED_URL   = "https://poshmark.com/feed"
+SERVICE        = "baum-reseller-poshmark"
+DOMAIN         = "poshmark.com"
+SESSION        = os.path.join(os.path.expanduser("~"), ".baum-reseller", "poshmark_session.json")
+PROFILE        = os.path.join(os.path.expanduser("~"), ".baum-reseller", "poshmark_profile")
+USERNAME_FILE  = os.path.join(os.path.expanduser("~"), ".baum-reseller", "poshmark_username.txt")
+LOGIN_URL      = "https://poshmark.com/login"
+FEED_URL       = "https://poshmark.com/feed"
 
 # Pages that indicate we are still mid-authentication — keep waiting while on these
 _AUTH = ("/login", "/verify", "/otp", "/two-step", "/challenge", "/auth/", "/sign")
@@ -87,11 +88,35 @@ class PoshmarkService:
         Preferred over Import Session when Chrome 127+ encryption blocks it.
         """
         from app.services.session_manager import open_login_browser
+
+        def _cache_username(page):
+            """Called right after session is saved, browser still open."""
+            try:
+                # Navigate to /closet — redirects to /closet/{username} when logged in
+                page.goto("https://poshmark.com/closet",
+                          wait_until="domcontentloaded", timeout=15_000)
+                m = re.search(r"poshmark\.com/closet/([^/?&#]+)", page.url)
+                if not m:
+                    # Client-side routing: URL stays at /closet, but content has username
+                    try:
+                        page.wait_for_selector('a[href*="/listing/"]', timeout=5_000)
+                    except Exception:
+                        pass
+                    m = re.search(r'"username"\s*:\s*"([^"]{2,40})"', page.content())
+                if m:
+                    uname = m.group(1)
+                    with open(USERNAME_FILE, "w", encoding="utf-8") as f:
+                        f.write(uname)
+            except Exception:
+                pass
+
         open_login_browser(
             platform="poshmark",
             start_url=LOGIN_URL,
-            success_glob="https://poshmark.com/feed",
+            # ** wildcard matches feed?login=true and any other query params
+            success_glob="https://poshmark.com/feed**",
             done_cb=done_cb,
+            post_save_cb=_cache_username,
         )
 
     # ── Connection test ───────────────────────────────────────────────────
@@ -132,7 +157,17 @@ class PoshmarkService:
         return legacy if os.path.exists(legacy) else None
 
     def _get_username_from_session(self) -> str:
-        """Extract username directly from saved session cookies — no page load needed."""
+        """Extract username from cache file or session cookies — no page load needed."""
+        # Fastest path: cached username file written at login time
+        if os.path.exists(USERNAME_FILE):
+            try:
+                with open(USERNAME_FILE, "r", encoding="utf-8") as f:
+                    uname = f.read().strip()
+                    if uname:
+                        return uname
+            except Exception:
+                pass
+
         session_file = self._get_session_file()
         if not session_file:
             return ""
@@ -169,7 +204,6 @@ class PoshmarkService:
                     try:
                         from urllib.parse import unquote
                         val = unquote(val)
-                        # If it looks like a plain username (no spaces, no equals), use it
                         if 2 <= len(val) <= 40 and " " not in val and "=" not in val:
                             return val.strip()
                     except Exception:
@@ -287,12 +321,18 @@ class PoshmarkService:
                 self.clear_session()
                 raise ValueError("Poshmark session expired — please re-authenticate.")
 
+            # Wait for the nav to hydrate so closet links are present in the DOM
+            try:
+                page.wait_for_selector('a[href*="/closet/"]', timeout=8_000)
+            except Exception:
+                pass
+
             username = self._get_username(page)
             if not username:
                 browser.close()
                 raise ValueError(
                     "Could not determine your Poshmark username.\n\n"
-                    "Try clicking 'Log Out' on the Sync page, then 'Login (Browser)' "
+                    "Please click 'Log Out' on the Sync page, then 'Login (Browser)' "
                     "to refresh your session."
                 )
 

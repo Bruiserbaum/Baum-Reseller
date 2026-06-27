@@ -34,11 +34,16 @@ def clear_session(platform: str):
 
 
 def open_login_browser(platform: str, start_url: str,
-                       success_glob: str, done_cb=None):
+                       success_glob: str, done_cb=None,
+                       post_save_cb=None):
     """
     Launch a visible Chromium browser at start_url.
     When the URL matches success_glob the session is saved and
     done_cb(True, None) is called. Times out after 3 minutes.
+
+    post_save_cb(page) is called (with the browser still open) right after
+    the session file is written, before the browser closes — useful for
+    extracting extra info (e.g. username) from the authenticated page.
     """
     def _run():
         try:
@@ -57,6 +62,11 @@ def open_login_browser(platform: str, start_url: str,
                     return
                 DATA_DIR.mkdir(parents=True, exist_ok=True)
                 ctx.storage_state(path=str(session_path(platform)))
+                if post_save_cb:
+                    try:
+                        post_save_cb(page)
+                    except Exception:
+                        pass
                 browser.close()
             if done_cb:
                 done_cb(True, None)
