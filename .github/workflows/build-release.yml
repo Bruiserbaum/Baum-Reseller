@@ -3,11 +3,11 @@ name: Build & Release Installer
 on:
   push:
     tags:
-      - 'v*'          # triggers on v1.0.0, v1.2.3, etc.
-  workflow_dispatch:  # allow manual trigger from GitHub UI
+      - 'v*'
+  workflow_dispatch:
 
 permissions:
-  contents: write   # required to create releases and upload assets
+  contents: write
 
 jobs:
   build:
@@ -34,8 +34,6 @@ jobs:
       - name: Pre-install Playwright Chromium into dist
         shell: pwsh
         run: |
-          # Install Chromium directly into the dist bundle so the app works
-          # out of the box without a download on first run.
           $env:PLAYWRIGHT_BROWSERS_PATH = Join-Path (Get-Location) "dist\BaumReseller\_internal\playwright-browsers"
           py -m playwright install chromium
 
@@ -43,13 +41,13 @@ jobs:
         shell: pwsh
         run: |
           if (-not (Test-Path "LICENSE")) {
-            "MIT License`n`nCopyright (c) 2026 Bruiserbaum`n`nPermission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the `"Software`"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:`n`nThe above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.`n`nTHE SOFTWARE IS PROVIDED `"AS IS`", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED." | Out-File LICENSE -Encoding utf8
+            "MIT License`n`nCopyright (c) 2026 Bruiserbaum" | Out-File LICENSE -Encoding utf8
           }
 
       - name: Build Inno Setup installer
+        shell: pwsh
         run: |
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\setup.iss
-        shell: pwsh
 
       - name: Get version from tag
         id: version
@@ -58,21 +56,24 @@ jobs:
           $tag = "${{ github.ref_name }}"
           echo "VERSION=$tag" >> $env:GITHUB_OUTPUT
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2.3.2
-        if: startsWith(github.ref, 'refs/tags/')
-        with:
-          name: Baum Reseller ${{ steps.version.outputs.VERSION }}
-          draft: false
-          prerelease: false
-          files: dist/BaumResellerSetup.exe
-          body: |
-            ## Baum Reseller ${{ steps.version.outputs.VERSION }}
-
-            ### Install
-            Download `BaumResellerSetup.exe` below and run it. No Python required.
-
-            ### What's new
-            See the [commit history](https://github.com/Bruiserbaum/Baum-Reseller/commits/${{ steps.version.outputs.VERSION }}) for changes in this release.
+      - name: Publish GitHub Release
+        shell: pwsh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ steps.version.outputs.VERSION }}"
+          $asset = "dist\BaumResellerSetup.exe"
+
+          $null = gh release view $tag 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Release $tag already exists, uploading asset."
+            gh release upload $tag $asset --clobber
+          } else {
+            gh release create $tag $asset `
+              --title "Baum Reseller $tag" `
+              --notes "## Baum Reseller $tag
+
+Download BaumResellerSetup.exe below and run it. No Python required. Chromium is bundled.
+
+See the commit history for changes in this release."
+          }
