@@ -139,33 +139,91 @@ class PoshmarkService:
         try:
             with open(session_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            for cookie in data.get("cookies", []):
-                name = cookie.get("name", "")
-                if name in ("poshmark_username", "_poshmark_login", "pm_username"):
-                    return cookie.get("value", "").strip()
+            cookies = {c.get("name", ""): c.get("value", "") for c in data.get("cookies", [])}
+
+            # Legacy / explicit username cookies
+            for name in ("poshmark_username", "_poshmark_login", "pm_username"):
+                if cookies.get(name, "").strip():
+                    return cookies[name].strip()
+
+            # Decode the JWT payload (base64, no signature needed)
+            jwt_val = cookies.get("jwt", "")
+            if jwt_val:
+                try:
+                    import base64 as _b64
+                    parts = jwt_val.split(".")
+                    if len(parts) >= 2:
+                        pad = parts[1] + "=" * (-len(parts[1]) % 4)
+                        payload = json.loads(_b64.b64decode(pad).decode("utf-8", errors="ignore"))
+                        uname = (payload.get("username") or payload.get("sub") or
+                                 payload.get("handle") or payload.get("login") or "")
+                        if uname and 2 <= len(uname) <= 60 and "/" not in uname:
+                            return uname.strip()
+                except Exception:
+                    pass
+
+            # __ps_lu cookie sometimes holds "username" directly (URL-encoded)
+            for name in ("__ps_lu", "__ps_slu"):
+                val = cookies.get(name, "")
+                if val:
+                    try:
+                        from urllib.parse import unquote
+                        val = unquote(val)
+                        # If it looks like a plain username (no spaces, no equals), use it
+                        if 2 <= len(val) <= 40 and " " not in val and "=" not in val:
+                            return val.strip()
+                    except Exception:
+                        pass
         except Exception:
             pass
         return ""
 
     def _get_username(self, page) -> str:
-        # 1. Try session cookies first (most reliable, no DOM dependency)
+        # 1. Try session cookies first (JWT decode etc.)
         uname = self._get_username_from_session()
         if uname:
             return uname
-        # 2. Try __NEXT_DATA__ / embedded JSON
+        # 2. Parse __NEXT_DATA__ script tag (Poshmark embeds user info there)
+        try:
+            el = page.query_selector("script#__NEXT_DATA__")
+            if el:
+                nd = json.loads(el.inner_text())
+                for path in (
+                    ("props", "pageProps", "currentUser", "username"),
+                    ("props", "pageProps", "user", "username"),
+                    ("props", "pageProps", "vm", "user", "username"),
+                    ("props", "pageProps", "userProfile", "username"),
+                ):
+                    obj = nd
+                    for key in path:
+                        obj = obj.get(key, {}) if isinstance(obj, dict) else {}
+                    if isinstance(obj, str) and obj:
+                        return obj.strip()
+        except Exception:
+            pass
+        # 3. Regex on raw page source
         try:
             m = re.search(r'"username"\s*:\s*"([^"]{2,40})"', page.content())
             if m:
                 return m.group(1)
         except Exception:
             pass
-        # 3. DOM selectors
-        for selector in [
+        # 4. Follow /closet redirect to extract username from final URL
+        try:
+            page.goto("https://poshmark.com/closet",
+                      wait_until="domcontentloaded", timeout=15_000)
+            m = re.search(r"poshmark\.com/closet/([^/?&#]+)", page.url)
+            if m:
+                return m.group(1)
+        except Exception:
+            pass
+        # 5. DOM selectors as last resort
+        for selector in (
             'a[href*="/closet/"]',
             '[data-et-name="my_closet"]',
             '[href*="/closet/"][class*="nav"]',
             'a[data-testid*="closet"]',
-        ]:
+        ):
             try:
                 el = page.query_selector(selector)
                 if el:
@@ -241,24 +299,39 @@ class PoshmarkService:
             if progress_cb:
                 progress_cb(f"Loading closet for @{username}…")
 
-            page.goto(f"https://poshmark.com/closet/{username}",
+            # sort_by=added puts newest listings first — ensures recent items are captured
+            page.goto(f"https://poshmark.com/closet/{username}?sort_by=added",
                       wait_until="load", timeout=30_000)
             page.wait_for_timeout(3_000)
-            for _ in range(6):
+            prev_count = 0
+            for _ in range(30):
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 page.wait_for_timeout(1_200)
+                cur = page.evaluate(
+                    "document.querySelectorAll('a[href*=\"/listing/\"]').length"
+                )
+                if cur == prev_count:
+                    break
+                prev_count = cur
 
             active_dom = _scrape_dom(page, status="active")
 
             if progress_cb:
                 progress_cb(f"Loading sold items for @{username}…")
 
-            page.goto(f"https://poshmark.com/closet/{username}?availability=sold_out",
+            page.goto(f"https://poshmark.com/closet/{username}?availability=sold_out&sort_by=added",
                       wait_until="load", timeout=30_000)
             page.wait_for_timeout(3_000)
-            for _ in range(3):
+            prev_count = 0
+            for _ in range(15):
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 page.wait_for_timeout(1_000)
+                cur = page.evaluate(
+                    "document.querySelectorAll('a[href*=\"/listing/\"]').length"
+                )
+                if cur == prev_count:
+                    break
+                prev_count = cur
 
             sold_dom = _scrape_dom(page, status="sold")
             browser.close()
