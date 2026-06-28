@@ -25,6 +25,11 @@ def _is_logged_in(url: str) -> bool:
     return "poshmark.com" in url and not any(a in url for a in _AUTH)
 
 
+def _valid_username(s: str) -> bool:
+    """Return True only if s looks like a real Poshmark username, not a URL or garbage."""
+    return bool(s and 3 <= len(s) <= 40 and ":" not in s and "/" not in s and " " not in s)
+
+
 class PoshmarkService:
 
     # ── Credentials ───────────────────────────────────────────────────────
@@ -231,24 +236,31 @@ class PoshmarkService:
                     obj = nd
                     for key in path:
                         obj = obj.get(key, {}) if isinstance(obj, dict) else {}
-                    if isinstance(obj, str) and obj:
+                    if isinstance(obj, str) and _valid_username(obj):
                         return obj.strip()
         except Exception:
             pass
-        # 3. Regex on raw page source
+        # 3. Regex on raw page source — use finditer to skip URL-shaped false positives
         try:
-            m = re.search(r'"username"\s*:\s*"([^"]{2,40})"', page.content())
-            if m:
-                return m.group(1)
+            for m in re.finditer(r'"username"\s*:\s*"([^"]{3,40})"', page.content()):
+                candidate = m.group(1)
+                if _valid_username(candidate):
+                    return candidate
         except Exception:
             pass
         # 4. Follow /closet redirect to extract username from final URL
         try:
             page.goto("https://poshmark.com/closet",
                       wait_until="domcontentloaded", timeout=15_000)
-            m = re.search(r"poshmark\.com/closet/([^/?&#]+)", page.url)
-            if m:
-                return m.group(1)
+            if not any(a in page.url for a in _AUTH):
+                m = re.search(r"poshmark\.com/closet/([^/?&#]+)", page.url)
+                if m and _valid_username(m.group(1)):
+                    return m.group(1)
+                # Client-side routing: URL stayed at /closet, check page content
+                for m2 in re.finditer(r'"username"\s*:\s*"([^"]{3,40})"', page.content()):
+                    candidate = m2.group(1)
+                    if _valid_username(candidate):
+                        return candidate
         except Exception:
             pass
         # 5. DOM selectors as last resort
@@ -263,7 +275,7 @@ class PoshmarkService:
                 if el:
                     href = el.get_attribute("href") or ""
                     m = re.search(r"/closet/([^/?&#]+)", href)
-                    if m:
+                    if m and _valid_username(m.group(1)):
                         return m.group(1)
             except Exception:
                 continue
@@ -281,6 +293,7 @@ class PoshmarkService:
 
         intercepted: list[dict] = []
         xhr_urls: list[str] = []
+        xhr_username: list[str] = []  # username found in any XHR response
 
         def _on_response(response):
             url = response.url
@@ -288,24 +301,40 @@ class PoshmarkService:
             if rtype not in ("xhr", "fetch"):
                 return
             xhr_urls.append(url)
-            # Broader filter: any Poshmark API or listing-shaped response
+            if "poshmark.com" not in url:
+                return
+            try:
+                data = response.json()
+            except Exception:
+                return
+            if not isinstance(data, (dict, list)):
+                return
+
+            # Extract username from any Poshmark API response that carries it
+            if isinstance(data, dict) and not xhr_username:
+                for key in ("user", "currentUser", "me", "account"):
+                    user = data.get(key)
+                    if isinstance(user, dict):
+                        uname = user.get("username") or user.get("login") or user.get("handle") or ""
+                        if uname and 2 <= len(str(uname)) <= 60 and "/" not in str(uname):
+                            xhr_username.append(str(uname).strip())
+                            break
+                # Also check top-level "username"
+                if not xhr_username:
+                    uname = data.get("username") or data.get("login") or ""
+                    if uname and 2 <= len(str(uname)) <= 60 and "/" not in str(uname):
+                        xhr_username.append(str(uname).strip())
+
             is_poshmark_api = (
-                "poshmark.com" in url and (
-                    "vm-rest" in url or
-                    "/api/" in url or
-                    "listings" in url or
-                    "closet" in url or
-                    "posts" in url or
-                    "catalog" in url
-                )
+                "vm-rest" in url or
+                "/api/" in url or
+                "listings" in url or
+                "closet" in url or
+                "posts" in url or
+                "catalog" in url
             )
             if is_poshmark_api:
-                try:
-                    data = response.json()
-                    if isinstance(data, (dict, list)):
-                        intercepted.append({"url": url, "body": data})
-                except Exception:
-                    pass
+                intercepted.append({"url": url, "body": data})
 
         with sync_playwright() as p:
             browser, ctx = headless_context(p, session_file)
@@ -327,7 +356,8 @@ class PoshmarkService:
             except Exception:
                 pass
 
-            username = self._get_username(page)
+            # XHR responses captured during feed load may already have the username
+            username = (xhr_username[0] if xhr_username else "") or self._get_username(page)
             if not username:
                 browser.close()
                 raise ValueError(
@@ -336,22 +366,34 @@ class PoshmarkService:
                     "to refresh your session."
                 )
 
+            # Cache for future syncs
+            try:
+                with open(USERNAME_FILE, "w", encoding="utf-8") as _uf:
+                    _uf.write(username)
+            except Exception:
+                pass
+
             if progress_cb:
                 progress_cb(f"Loading closet for @{username}…")
 
-            # sort_by=added puts newest listings first — ensures recent items are captured
-            page.goto(f"https://poshmark.com/closet/{username}?sort_by=added",
+            # Default sort (Just Shared) — sort_by=added is not a valid Poshmark param
+            page.goto(f"https://poshmark.com/closet/{username}",
                       wait_until="load", timeout=30_000)
             page.wait_for_timeout(3_000)
-            prev_count = 0
+            prev_count = -1  # start at -1 so first check never short-circuits
+            stable_count = 0
             for _ in range(30):
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 page.wait_for_timeout(1_200)
                 cur = page.evaluate(
-                    "document.querySelectorAll('a[href*=\"/listing/\"]').length"
+                    "document.querySelectorAll('a[href*=\"/listing/\"], a[href*=\"/edit/listing/\"]').length"
                 )
                 if cur == prev_count:
-                    break
+                    stable_count += 1
+                    if stable_count >= 2:  # stable for 2 consecutive scrolls → done
+                        break
+                else:
+                    stable_count = 0
                 prev_count = cur
 
             active_dom = _scrape_dom(page, status="active")
@@ -359,18 +401,23 @@ class PoshmarkService:
             if progress_cb:
                 progress_cb(f"Loading sold items for @{username}…")
 
-            page.goto(f"https://poshmark.com/closet/{username}?availability=sold_out&sort_by=added",
+            page.goto(f"https://poshmark.com/closet/{username}?availability=sold_out",
                       wait_until="load", timeout=30_000)
             page.wait_for_timeout(3_000)
-            prev_count = 0
+            prev_count = -1
+            stable_count = 0
             for _ in range(15):
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 page.wait_for_timeout(1_000)
                 cur = page.evaluate(
-                    "document.querySelectorAll('a[href*=\"/listing/\"]').length"
+                    "document.querySelectorAll('a[href*=\"/listing/\"], a[href*=\"/edit/listing/\"]').length"
                 )
                 if cur == prev_count:
-                    break
+                    stable_count += 1
+                    if stable_count >= 2:
+                        break
+                else:
+                    stable_count = 0
                 prev_count = cur
 
             sold_dom = _scrape_dom(page, status="sold")
@@ -411,14 +458,18 @@ class PoshmarkService:
 
 def _scrape_dom(page, status: str = "active") -> list[dict]:
     """
-    Walk every /listing/ link in the page — class-agnostic, survives UI changes.
+    Walk every /listing/ or /edit/listing/ link — handles both the public view
+    and the owner's edit view of a Poshmark closet.
     """
     raw = page.evaluate(r"""
         () => {
             const seen = new Set();
             const results = [];
-            for (const link of document.querySelectorAll('a[href*="/listing/"]')) {
-                const m = link.href.match(/\/listing\/([^/?#]+)/);
+            // Match both public /listing/ and owner /edit/listing/ links
+            const selector = 'a[href*="/listing/"], a[href*="/edit/listing/"]';
+            for (const link of document.querySelectorAll(selector)) {
+                // Extract listing ID from either URL format
+                const m = link.href.match(/\/(?:edit\/)?listing\/([^/?#]+)/);
                 if (!m) continue;
                 const lid = m[1];
                 if (seen.has(lid) || lid.length < 5) continue;
@@ -436,7 +487,7 @@ def _scrape_dom(page, status: str = "active") -> list[dict]:
                 let title = name ? name.textContent.trim() : link.textContent.trim();
                 if (!title) title = 'Untitled';
                 results.push({
-                    url:     link.href,
+                    url:     'https://poshmark.com/listing/' + lid,
                     title,
                     price:   price ? price.textContent.replace(/[^0-9.]/g, '') : '0',
                     img_url: img ? img.src : '',
