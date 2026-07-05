@@ -398,6 +398,23 @@ class PoshmarkService:
 
             active_dom = _scrape_dom(page, status="active")
 
+            # Second pass: "Just In" sort captures newly listed items that haven't been
+            # shared yet and would otherwise sit below the scroll limit on a large closet.
+            if progress_cb:
+                progress_cb(f"Checking newest listings for @{username}…")
+            try:
+                page.goto(f"https://poshmark.com/closet/{username}?sort_by=added_desc",
+                          wait_until="load", timeout=20_000)
+                page.wait_for_timeout(2_000)
+                for _ in range(5):
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    page.wait_for_timeout(1_200)
+                newest_dom = _scrape_dom(page, status="active")
+                existing_ids = {item["listing_id"] for item in active_dom}
+                active_dom += [i for i in newest_dom if i["listing_id"] not in existing_ids]
+            except Exception:
+                pass
+
             if progress_cb:
                 progress_cb(f"Loading sold items for @{username}…")
 
