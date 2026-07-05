@@ -115,6 +115,9 @@ class MainWindow(QMainWindow):
         # Backup restore → reload all live views
         self.settings_view.data_imported.connect(self._on_backup_imported)
 
+        # DB path change → reinit DB and reload views
+        self.settings_view.db_path_changed.connect(self._on_db_path_changed)
+
         # Trending view signals completion via optional attribute
         if hasattr(self.trending_view, "trending_updated"):
             self.trending_view.trending_updated.connect(self._on_trending_done)
@@ -135,6 +138,12 @@ class MainWindow(QMainWindow):
         # ── Background services ───────────────────────────────────────────
         from app.services.enrich_service import start_idle_enrichment
         start_idle_enrichment()
+
+        # DB file watcher: detects when another machine's sync updates the DB
+        # via Google Drive / OneDrive and refreshes inventory automatically.
+        from app.utils.db_watcher import DbWatcher
+        self._db_watcher = DbWatcher(on_change=self._on_external_db_change)
+        self._db_watcher.start()
 
         QTimer.singleShot(2_000, self._backfill_categories)
 
@@ -262,6 +271,25 @@ class MainWindow(QMainWindow):
         self.notifications_view.refresh()
         self._refresh_status()
         self.status_bar.showMessage("✓  Backup restored — all views refreshed", 10_000)
+
+    def _on_db_path_changed(self):
+        """Called when the user points the app at a different DB file."""
+        from app.database.connection import init_db
+        init_db()
+        self._db_watcher.stop()
+        self._db_watcher.start()
+        self._on_backup_imported()
+        self.status_bar.showMessage("✓  Database location updated — inventory refreshed", 10_000)
+
+    def _on_external_db_change(self):
+        """Called by DbWatcher when another machine has updated the DB file."""
+        from app.utils.qt_thread import post_to_main
+        def _refresh():
+            self.inventory_view.mark_dirty()
+            self.inventory_view.lazy_refresh()
+            self.containers_view.mark_dirty()
+            self.status_bar.showMessage("↺  Inventory refreshed from cloud sync", 6_000)
+        post_to_main(_refresh)
 
     def _on_trending_done(self):
         self.status_bar.showMessage("✓  Trending data updated", 8_000)

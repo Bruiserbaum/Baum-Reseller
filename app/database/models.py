@@ -101,9 +101,32 @@ def upsert_listing(data: dict) -> int:
                 status=excluded.status,
                 sold_date=excluded.sold_date,
                 sold_price=excluded.sold_price,
+                last_seen=datetime('now'),
                 updated_at=datetime('now')
         """, values)
+        # Also stamp last_seen on insert (new rows get NULL from schema default)
+        conn.execute(
+            "UPDATE listings SET last_seen=datetime('now') WHERE rowid=? AND last_seen IS NULL",
+            (cur.lastrowid,)
+        )
         return cur.lastrowid
+
+
+def get_stale_listings(platform: str, days: int = 7) -> list[dict]:
+    """Return active listings not seen by any sync in the last `days` days."""
+    with get_connection() as conn:
+        rows = conn.execute("""
+            SELECT l.id, l.listing_id, l.url, l.item_id, l.last_seen
+            FROM listings l
+            WHERE l.platform = ?
+              AND l.status = 'active'
+              AND (
+                  l.last_seen IS NULL
+                  OR l.last_seen < datetime('now', ? || ' days')
+              )
+            ORDER BY l.last_seen ASC
+        """, (platform, f"-{days}")).fetchall()
+        return [dict(r) for r in rows]
 
 
 def delete_listing(listing_id: int):

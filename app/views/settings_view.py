@@ -17,6 +17,8 @@ from version import VERSION
 class SettingsView(QWidget):
     # Emitted after a successful local import so the main window can refresh all views
     data_imported = Signal()
+    # Emitted when the DB path changes so the main window can reinit and reload
+    db_path_changed = Signal()
 
     def __init__(self):
         super().__init__()
@@ -223,6 +225,41 @@ class SettingsView(QWidget):
 
         layout.addWidget(manual_group)
 
+        # ── Database Location ─────────────────────────────────────────────
+        db_group = QGroupBox("Database Location")
+        db_layout = QVBoxLayout(db_group)
+
+        db_layout.addWidget(self._make_info_btn(
+            "Multi-Machine Sync via Cloud Storage",
+            "Point the database to a folder inside Google Drive or OneDrive.\n\n"
+            "Both machines must have the same cloud folder synced locally. "
+            "When one machine syncs inventory, the DB file is updated on disk, "
+            "the cloud client syncs it, and the other machine's app detects the "
+            "change and refreshes automatically (within ~10 seconds after sync).\n\n"
+            "Tip: create a dedicated subfolder like:\n"
+            "  Google Drive / Baum Reseller / baum_reseller.db"
+        ), alignment=Qt.AlignRight)
+
+        db_path_row = QHBoxLayout()
+        db_path_row.addWidget(QLabel("Path:"))
+        self._db_path_field = QLineEdit()
+        self._db_path_field.setReadOnly(True)
+        self._db_path_field.setPlaceholderText("Default location (~/.baum-reseller/baum_reseller.db)")
+        db_path_row.addWidget(self._db_path_field, 1)
+        db_browse_btn = QPushButton("Browse…")
+        db_browse_btn.clicked.connect(self._browse_db_path)
+        db_path_row.addWidget(db_browse_btn)
+        db_reset_btn = QPushButton("Reset to Default")
+        db_reset_btn.clicked.connect(self._reset_db_path)
+        db_path_row.addWidget(db_reset_btn)
+        db_layout.addLayout(db_path_row)
+
+        self._db_path_status = QLabel("")
+        self._db_path_status.setStyleSheet("color: #a6adc8; font-size: 11px;")
+        db_layout.addWidget(self._db_path_status)
+
+        layout.addWidget(db_group)
+
         # ── Data location info (compact, bottom of page) ──────────────────
         data_dir = os.path.join(os.path.expanduser("~"), ".baum-reseller")
         data_row = QHBoxLayout()
@@ -251,6 +288,13 @@ class SettingsView(QWidget):
             self._api_key_status.setText("✓ Key stored")
             self._api_key_status.setStyleSheet("color: #a6e3a1; font-size: 11px;")
 
+        # DB path
+        from app.database.connection import get_db_path, _DEFAULT_DB
+        current = get_db_path()
+        if current != _DEFAULT_DB:
+            self._db_path_field.setText(current)
+            self._db_path_status.setText("Using custom database location")
+
         sched = get_setting("backup_schedule", "Disabled")
         idx = self.backup_schedule.findText(sched)
         if idx >= 0:
@@ -262,6 +306,57 @@ class SettingsView(QWidget):
         token = os.path.join(os.path.expanduser("~"), ".baum-reseller", "gdrive_token.pkl")
         if os.path.exists(token):
             self.gdrive_status.setText("Google Drive: Connected")
+
+    # ── Database path ─────────────────────────────────────────────────────
+
+    def _browse_db_path(self):
+        import shutil
+        from app.database.connection import get_db_path, set_db_path, _DEFAULT_DB
+
+        new_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Choose Database File Location",
+            os.path.join(os.path.expanduser("~"), "baum_reseller.db"),
+            "SQLite Database (*.db)",
+        )
+        if not new_path:
+            return
+        if not new_path.endswith(".db"):
+            new_path += ".db"
+
+        current = get_db_path()
+        if os.path.normpath(new_path) == os.path.normpath(current):
+            return
+
+        # Offer to copy the existing DB to the new location
+        if os.path.exists(current):
+            reply = QMessageBox.question(
+                self, "Move Database",
+                f"Copy your existing database to:\n\n{new_path}\n\n"
+                "The original file will be left in place as a backup.",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+            )
+            if reply == QMessageBox.Yes:
+                try:
+                    os.makedirs(os.path.dirname(new_path), exist_ok=True)
+                    shutil.copy2(current, new_path)
+                except Exception as e:
+                    QMessageBox.critical(self, "Copy Failed", str(e))
+                    return
+
+        set_db_path(new_path)
+        self._db_path_field.setText(new_path)
+        self._db_path_status.setText("Database location updated — restart not required")
+        self._db_path_status.setStyleSheet("color: #a6e3a1; font-size: 11px;")
+        self.db_path_changed.emit()
+
+    def _reset_db_path(self):
+        from app.database.connection import set_db_path, _DEFAULT_DB
+        set_db_path("")
+        self._db_path_field.clear()
+        self._db_path_status.setText("Reset to default location")
+        self._db_path_status.setStyleSheet("color: #a6adc8; font-size: 11px;")
+        self.db_path_changed.emit()
 
     # ── Anthropic API key ─────────────────────────────────────────────────
 

@@ -1,7 +1,40 @@
 import sqlite3
 import os
+import json
 
-DB_PATH = os.path.join(os.path.expanduser("~"), ".baum-reseller", "baum_reseller.db")
+_DATA_DIR = os.path.join(os.path.expanduser("~"), ".baum-reseller")
+_CONFIG_FILE = os.path.join(_DATA_DIR, "config.json")
+_DEFAULT_DB = os.path.join(_DATA_DIR, "baum_reseller.db")
+
+
+def get_db_path() -> str:
+    """Return the active DB path — either from config.json or the default location."""
+    try:
+        with open(_CONFIG_FILE, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        p = cfg.get("db_path", "").strip()
+        if p:
+            return p
+    except Exception:
+        pass
+    return _DEFAULT_DB
+
+
+def set_db_path(new_path: str):
+    """Persist a new DB path to config.json."""
+    os.makedirs(_DATA_DIR, exist_ok=True)
+    try:
+        with open(_CONFIG_FILE, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except Exception:
+        cfg = {}
+    cfg["db_path"] = new_path
+    with open(_CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
+
+
+# Legacy module-level alias kept for any code that imports DB_PATH directly.
+DB_PATH = get_db_path()
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS items (
@@ -118,6 +151,10 @@ MIGRATIONS = [
     # Pending-listing workflow: track whether an item is waiting to be listed
     # Values: 'active' (default/normal) | 'pending' (acquired, not yet listed)
     "ALTER TABLE items ADD COLUMN item_status TEXT DEFAULT 'active'",
+    # last_seen: timestamp of the most recent sync that returned this listing.
+    # Used by the reconciliation pass to detect listings that stopped appearing.
+    "ALTER TABLE listings ADD COLUMN last_seen TEXT DEFAULT NULL",
+    "CREATE INDEX IF NOT EXISTS idx_listings_last_seen ON listings(platform, last_seen)",
     # Backfill: auto-convert existing sold listings → sales records.
     # Runs every startup but is idempotent (NOT EXISTS prevents duplication).
     """INSERT INTO sales
@@ -139,7 +176,7 @@ MIGRATIONS = [
 
 
 def get_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn = sqlite3.connect(get_db_path(), timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     # WAL mode lets readers and writers proceed concurrently — critical so that
@@ -150,7 +187,7 @@ def get_connection() -> sqlite3.Connection:
 
 
 def init_db():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    os.makedirs(os.path.dirname(get_db_path()), exist_ok=True)
     with get_connection() as conn:
         conn.executescript(SCHEMA)
         for migration in MIGRATIONS:
