@@ -294,6 +294,8 @@ class PoshmarkService:
         intercepted: list[dict] = []
         xhr_urls: list[str] = []
         xhr_username: list[str] = []  # username found in any XHR response
+        closet_xhr_all: list[dict] = []  # ALL poshmark.com XHR during closet scroll
+        _phase = ["feed"]  # mutable so the closure can read phase changes
 
         def _on_response(response):
             url = response.url
@@ -309,6 +311,21 @@ class PoshmarkService:
                 return
             if not isinstance(data, (dict, list)):
                 return
+
+            # During closet scroll: capture every poshmark.com XHR for API discovery
+            if _phase[0] == "closet":
+                try:
+                    if isinstance(data, dict):
+                        sample = {k: data[k] for k in list(data.keys())[:3]}
+                    else:
+                        sample = data[:2] if isinstance(data, list) else []
+                    closet_xhr_all.append({
+                        "url": url,
+                        "top_keys": list(data.keys())[:10] if isinstance(data, dict) else f"list[{len(data)}]",
+                        "sample": sample,
+                    })
+                except Exception:
+                    pass
 
             # Extract username from any Poshmark API response that carries it
             if isinstance(data, dict) and not xhr_username:
@@ -376,6 +393,7 @@ class PoshmarkService:
             if progress_cb:
                 progress_cb(f"Loading closet for @{username}…")
 
+            _phase[0] = "closet"
             # Default sort (Just Shared) — sort_by=added is not a valid Poshmark param
             page.goto(f"https://poshmark.com/closet/{username}",
                       wait_until="load", timeout=30_000)
@@ -473,6 +491,7 @@ class PoshmarkService:
             "dom_sold_items":         len(sold_dom),
             "total_returned":         len(result),
             "sample_items":           result[:3],
+            "closet_page_xhr":        closet_xhr_all,
         }
         _debug_path = os.path.join(
             os.path.expanduser("~"), ".baum-reseller", "debug_poshmark_sync.json"
