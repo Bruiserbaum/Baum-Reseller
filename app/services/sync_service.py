@@ -38,6 +38,7 @@ def sync_platform(platform: str, progress_cb=None, done_cb=None):
                 except Exception:
                     pass  # don't abort active-listing sync if orders fail
             _persist_listings(platform, listings)
+            _reconcile(platform, svc, progress_cb)
             ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
             set_setting(f"last_sync_{platform}", ts)
             set_setting("last_sync_time", ts)
@@ -69,6 +70,7 @@ def sync_all(progress_cb=None, done_cb=None):
                     except Exception:
                         pass
                 _persist_listings(p, listings)
+                _reconcile(p, svc, progress_cb)
                 counts[p] = len(listings)
                 ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
                 set_setting(f"last_sync_{p}", ts)
@@ -81,6 +83,18 @@ def sync_all(progress_cb=None, done_cb=None):
             done_cb(counts, errors)
 
     threading.Thread(target=_worker, daemon=True).start()
+
+
+def _reconcile(platform: str, svc, progress_cb=None):
+    """Run the post-sync reconciliation pass for stale listings (best-effort)."""
+    try:
+        session_file = svc._get_session_file() if hasattr(svc, "_get_session_file") else None
+        if not session_file:
+            return
+        from app.services.reconcile_service import reconcile_platform
+        reconcile_platform(platform, session_file, max_check=50, progress_cb=progress_cb)
+    except Exception:
+        pass
 
 
 def _persist_listings(platform: str, listings: list[dict]):
