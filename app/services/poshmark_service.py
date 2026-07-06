@@ -287,71 +287,37 @@ class PoshmarkService:
             raise ValueError("Not logged in to Poshmark. Click 'Login with Browser' first.")
 
         import datetime as _dt
-        import json as _json
         from playwright.sync_api import sync_playwright
         from app.utils.browser import headless_context
 
-        intercepted: list[dict] = []
-        xhr_urls: list[str] = []
-        xhr_username: list[str] = []  # username found in any XHR response
-        closet_xhr_all: list[dict] = []  # ALL poshmark.com XHR during closet scroll
-        _phase = ["feed"]  # mutable so the closure can read phase changes
+        pm_version_found: list[str] = []
+        xhr_username: list[str] = []
 
         def _on_response(response):
             url = response.url
-            rtype = response.request.resource_type
-            if rtype not in ("xhr", "fetch"):
+            if response.request.resource_type not in ("xhr", "fetch"):
                 return
-            xhr_urls.append(url)
             if "poshmark.com" not in url:
                 return
-            try:
-                data = response.json()
-            except Exception:
-                return
-            if not isinstance(data, (dict, list)):
-                return
-
-            # During closet scroll: capture every poshmark.com XHR for API discovery
-            if _phase[0] == "closet":
+            # Capture pm_version from the first paginated API call
+            if "posts/filtered" in url and not pm_version_found:
+                m = re.search(r"pm_version=([^&\s]+)", url)
+                if m:
+                    pm_version_found.append(m.group(1))
+            # Capture username from early XHR responses
+            if not xhr_username:
                 try:
+                    data = response.json()
                     if isinstance(data, dict):
-                        sample = {k: data[k] for k in list(data.keys())[:3]}
-                    else:
-                        sample = data[:2] if isinstance(data, list) else []
-                    closet_xhr_all.append({
-                        "url": url,
-                        "top_keys": list(data.keys())[:10] if isinstance(data, dict) else f"list[{len(data)}]",
-                        "sample": sample,
-                    })
+                        for key in ("user", "currentUser", "me", "account"):
+                            user = data.get(key)
+                            if isinstance(user, dict):
+                                uname = user.get("username") or user.get("login") or ""
+                                if uname and 2 <= len(str(uname)) <= 60 and "/" not in str(uname):
+                                    xhr_username.append(str(uname).strip())
+                                    break
                 except Exception:
                     pass
-
-            # Extract username from any Poshmark API response that carries it
-            if isinstance(data, dict) and not xhr_username:
-                for key in ("user", "currentUser", "me", "account"):
-                    user = data.get(key)
-                    if isinstance(user, dict):
-                        uname = user.get("username") or user.get("login") or user.get("handle") or ""
-                        if uname and 2 <= len(str(uname)) <= 60 and "/" not in str(uname):
-                            xhr_username.append(str(uname).strip())
-                            break
-                # Also check top-level "username"
-                if not xhr_username:
-                    uname = data.get("username") or data.get("login") or ""
-                    if uname and 2 <= len(str(uname)) <= 60 and "/" not in str(uname):
-                        xhr_username.append(str(uname).strip())
-
-            is_poshmark_api = (
-                "vm-rest" in url or
-                "/api/" in url or
-                "listings" in url or
-                "closet" in url or
-                "posts" in url or
-                "catalog" in url
-            )
-            if is_poshmark_api:
-                intercepted.append({"url": url, "body": data})
 
         with sync_playwright() as p:
             browser, ctx = headless_context(p, session_file)
@@ -367,13 +333,11 @@ class PoshmarkService:
                 self.clear_session()
                 raise ValueError("Poshmark session expired — please re-authenticate.")
 
-            # Wait for the nav to hydrate so closet links are present in the DOM
             try:
                 page.wait_for_selector('a[href*="/closet/"]', timeout=8_000)
             except Exception:
                 pass
 
-            # XHR responses captured during feed load may already have the username
             username = (xhr_username[0] if xhr_username else "") or self._get_username(page)
             if not username:
                 browser.close()
@@ -383,7 +347,6 @@ class PoshmarkService:
                     "to refresh your session."
                 )
 
-            # Cache for future syncs
             try:
                 with open(USERNAME_FILE, "w", encoding="utf-8") as _uf:
                     _uf.write(username)
@@ -391,118 +354,54 @@ class PoshmarkService:
                 pass
 
             if progress_cb:
-                progress_cb(f"Loading closet for @{username}…")
+                progress_cb(f"Fetching listings for @{username}…")
 
-            _phase[0] = "closet"
-            # Default sort (Just Shared) — sort_by=added is not a valid Poshmark param
+            # Load the closet page once so the browser picks up session context and
+            # we capture the current pm_version from the first XHR it fires.
             page.goto(f"https://poshmark.com/closet/{username}",
                       wait_until="load", timeout=30_000)
-            page.wait_for_timeout(3_000)
-            prev_count = -1  # start at -1 so first check never short-circuits
-            stable_count = 0
-            for _ in range(30):
-                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                page.wait_for_timeout(1_200)
-                cur = page.evaluate(
-                    "document.querySelectorAll('a[href*=\"/listing/\"], a[href*=\"/edit/listing/\"]').length"
-                )
-                if cur == prev_count:
-                    stable_count += 1
-                    if stable_count >= 2:  # stable for 2 consecutive scrolls → done
-                        break
-                else:
-                    stable_count = 0
-                prev_count = cur
+            page.wait_for_timeout(2_000)
 
-            active_dom = _scrape_dom(page, status="active")
+            pm_version = pm_version_found[0] if pm_version_found else "2026.27.01"
 
-            # Second pass: "Just In" (newest-first) sort captures items that were listed
-            # recently but never shared — they sit below the scroll limit in the default
-            # "Just Shared" sort but rise to the top here.
-            if progress_cb:
-                progress_cb(f"Checking newest listings for @{username}…")
-            try:
-                page.goto(f"https://poshmark.com/closet/{username}?sort_by=added_desc",
-                          wait_until="load", timeout=20_000)
-                page.wait_for_timeout(3_000)
-                prev_count2 = -1
-                stable_count2 = 0
-                for _ in range(30):
-                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    page.wait_for_timeout(1_200)
-                    cur2 = page.evaluate(
-                        "document.querySelectorAll('a[href*=\"/listing/\"], a[href*=\"/edit/listing/\"]').length"
-                    )
-                    if cur2 == prev_count2:
-                        stable_count2 += 1
-                        if stable_count2 >= 2:
-                            break
-                    else:
-                        stable_count2 = 0
-                    prev_count2 = cur2
-                newest_dom = _scrape_dom(page, status="active")
-                existing_ids = {item["listing_id"] for item in active_dom}
-                active_dom += [i for i in newest_dom if i["listing_id"] not in existing_ids]
-            except Exception:
-                pass
+            # Paginate the full closet via direct API calls — no DOM scrolling
+            active_listings = _fetch_all_via_api(
+                page, username, inventory_status="all",
+                pm_version=pm_version, progress_cb=progress_cb,
+            )
 
             if progress_cb:
-                progress_cb(f"Loading sold items for @{username}…")
+                progress_cb(f"Fetching sold listings for @{username}…")
 
-            page.goto(f"https://poshmark.com/closet/{username}?availability=sold_out",
-                      wait_until="load", timeout=30_000)
-            page.wait_for_timeout(3_000)
-            prev_count = -1
-            stable_count = 0
-            for _ in range(15):
-                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                page.wait_for_timeout(1_000)
-                cur = page.evaluate(
-                    "document.querySelectorAll('a[href*=\"/listing/\"], a[href*=\"/edit/listing/\"]').length"
-                )
-                if cur == prev_count:
-                    stable_count += 1
-                    if stable_count >= 2:
-                        break
-                else:
-                    stable_count = 0
-                prev_count = cur
+            sold_listings = _fetch_all_via_api(
+                page, username, inventory_status="sold_out",
+                pm_version=pm_version, progress_cb=progress_cb,
+            )
 
-            sold_dom = _scrape_dom(page, status="sold")
             browser.close()
 
-        api_results = _parse_api_responses([e["body"] for e in intercepted])
-        dom_results = active_dom + sold_dom
-        result = api_results if len(api_results) >= len(dom_results) else dom_results
+        all_listings = active_listings + sold_listings
 
-        # ── Debug log ─────────────────────────────────────────────────────
         _debug = {
-            "timestamp":              _dt.datetime.now().isoformat(),
-            "platform":               "poshmark",
-            "username":               username,
-            "xhr_responses_captured": len(intercepted),
-            "xhr_urls":               xhr_urls[:20],
-            "xhr_body_top_keys":      [
-                list(e["body"].keys())[:6] if isinstance(e["body"], dict) else []
-                for e in intercepted[:10]
-            ],
-            "xhr_items_parsed":       len(api_results),
-            "dom_active_items":       len(active_dom),
-            "dom_sold_items":         len(sold_dom),
-            "total_returned":         len(result),
-            "sample_items":           result[:3],
-            "closet_page_xhr":        closet_xhr_all,
+            "timestamp":      _dt.datetime.now().isoformat(),
+            "platform":       "poshmark",
+            "username":       username,
+            "pm_version":     pm_version,
+            "api_active":     len(active_listings),
+            "api_sold":       len(sold_listings),
+            "total_returned": len(all_listings),
+            "sample_items":   all_listings[:3],
         }
         _debug_path = os.path.join(
             os.path.expanduser("~"), ".baum-reseller", "debug_poshmark_sync.json"
         )
         try:
             with open(_debug_path, "w", encoding="utf-8") as _f:
-                _json.dump(_debug, _f, indent=2, default=str)
+                json.dump(_debug, _f, indent=2, default=str)
         except Exception:
             pass
 
-        return result
+        return all_listings
 
 
 def _scrape_dom(page, status: str = "active") -> list[dict]:
@@ -597,4 +496,91 @@ def _parse_api_responses(responses: list[dict]) -> list[dict]:
                 "img_url":    (item.get("picture_url") or
                                item.get("cover_shot", {}).get("url_small") or ""),
             })
+    return results
+
+
+def _fetch_all_via_api(page, username: str, inventory_status: str = "all",
+                       pm_version: str = "2026.27.01", progress_cb=None) -> list[dict]:
+    """
+    Paginate the Poshmark closet API directly from within the browser session.
+    Uses page.evaluate(fetch(...)) so session cookies are automatically included.
+    Returns all listings without any DOM scroll limit.
+    """
+    from urllib.parse import quote
+
+    results: list[dict] = []
+    seen: set[str] = set()
+    max_id = None
+    page_num = 0
+    base_status = "sold" if inventory_status == "sold_out" else "active"
+
+    while True:
+        page_num += 1
+        req: dict = {
+            "filters": {"department": "All", "inventory_status": [inventory_status]},
+            "sort_by": "added_desc",
+            "experience": "all",
+            "count": 48,
+            "static_facets": False,
+            "shouldFetchFacetsForClosetRerank": False,
+            "shouldFetchFacetsForMobile": False,
+        }
+        if max_id is not None:
+            req["max_id"] = max_id
+
+        api_url = (
+            f"https://poshmark.com/vm-rest/users/{username}/posts/filtered"
+            f"?request={quote(json.dumps(req, separators=(',', ':')))}"
+            f"&summarize=true&app_version=2.55&pm_version={pm_version}"
+        )
+
+        try:
+            data = page.evaluate("(url) => fetch(url).then(r => r.json())", api_url)
+        except Exception:
+            break
+
+        if not isinstance(data, dict):
+            break
+
+        items = data.get("data") or []
+        if not isinstance(items, list) or not items:
+            break
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            lid = str(item.get("id") or "")
+            if not lid or lid in seen:
+                continue
+            seen.add(lid)
+
+            inventory = item.get("inventory") or {}
+            status_raw = str(
+                inventory.get("status") or item.get("status") or "available"
+            ).lower()
+            item_status = "sold" if ("sold" in status_raw or "not_for_sale" in status_raw) else base_status
+
+            price_data = item.get("price_amount") or item.get("price") or {}
+            price = (
+                float(price_data.get("val", 0)) if isinstance(price_data, dict)
+                else float(price_data or 0)
+            )
+            cover = item.get("cover_shot") or {}
+            results.append({
+                "listing_id": lid,
+                "title":      item.get("title") or item.get("name") or "Untitled",
+                "url":        f"https://poshmark.com/listing/{lid}",
+                "price":      price,
+                "status":     item_status,
+                "img_url":    item.get("picture_url") or cover.get("url_small") or "",
+            })
+
+        if progress_cb and page_num % 5 == 0:
+            progress_cb(f"Fetched {len(results)} {base_status} listings…")
+
+        more = data.get("more")
+        if not more:
+            break
+        max_id = more
+
     return results
