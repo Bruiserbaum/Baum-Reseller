@@ -354,43 +354,98 @@ class PoshmarkService:
                 pass
 
             if progress_cb:
-                progress_cb(f"Fetching listings for @{username}…")
+                progress_cb(f"Loading closet for @{username}…")
 
-            # Load the closet page once so the browser picks up session context and
-            # we capture the current pm_version from the first XHR it fires.
+            # ── Pass 1: Default sort (Just Shared) ────────────────────────
             page.goto(f"https://poshmark.com/closet/{username}",
                       wait_until="load", timeout=30_000)
-            page.wait_for_timeout(2_000)
-
+            page.wait_for_timeout(3_000)
+            prev_count = -1
+            stable_count = 0
+            for _ in range(30):
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                page.wait_for_timeout(1_200)
+                cur = page.evaluate(
+                    "document.querySelectorAll('a[href*=\"/listing/\"], a[href*=\"/edit/listing/\"]').length"
+                )
+                if cur == prev_count:
+                    stable_count += 1
+                    if stable_count >= 2:
+                        break
+                else:
+                    stable_count = 0
+                prev_count = cur
+            active_dom = _scrape_dom(page, status="active")
             pm_version = pm_version_found[0] if pm_version_found else "2026.27.01"
 
-            # Paginate the full closet via direct API calls — no DOM scrolling
-            active_listings = _fetch_all_via_api(
-                page, username, inventory_status="all",
-                pm_version=pm_version, progress_cb=progress_cb,
-            )
+            # ── Pass 2: Newest-first sort (catches never-shared items) ─────
+            if progress_cb:
+                progress_cb(f"Checking newest listings for @{username}…")
+            try:
+                page.goto(f"https://poshmark.com/closet/{username}?sort_by=added_desc",
+                          wait_until="load", timeout=20_000)
+                page.wait_for_timeout(3_000)
+                prev_count2 = -1
+                stable_count2 = 0
+                for _ in range(30):
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    page.wait_for_timeout(1_200)
+                    cur2 = page.evaluate(
+                        "document.querySelectorAll('a[href*=\"/listing/\"], a[href*=\"/edit/listing/\"]').length"
+                    )
+                    if cur2 == prev_count2:
+                        stable_count2 += 1
+                        if stable_count2 >= 2:
+                            break
+                    else:
+                        stable_count2 = 0
+                    prev_count2 = cur2
+                newest_dom = _scrape_dom(page, status="active")
+                existing_ids = {item["listing_id"] for item in active_dom}
+                active_dom += [i for i in newest_dom if i["listing_id"] not in existing_ids]
+            except Exception:
+                pass
 
             if progress_cb:
-                progress_cb(f"Fetching sold listings for @{username}…")
+                progress_cb(f"Loading sold items for @{username}…")
 
-            sold_listings = _fetch_all_via_api(
-                page, username, inventory_status="sold_out",
-                pm_version=pm_version, progress_cb=progress_cb,
-            )
+            page.goto(f"https://poshmark.com/closet/{username}?availability=sold_out",
+                      wait_until="load", timeout=30_000)
+            page.wait_for_timeout(3_000)
+            prev_count = -1
+            stable_count = 0
+            for _ in range(15):
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                page.wait_for_timeout(1_000)
+                cur = page.evaluate(
+                    "document.querySelectorAll('a[href*=\"/listing/\"], a[href*=\"/edit/listing/\"]').length"
+                )
+                if cur == prev_count:
+                    stable_count += 1
+                    if stable_count >= 2:
+                        break
+                else:
+                    stable_count = 0
+                prev_count = cur
+            sold_dom = _scrape_dom(page, status="sold")
+
+            # ── API probe: 3 items to capture the real response structure ──
+            api_probe = _probe_api_structure(page, username, pm_version)
 
             browser.close()
 
-        all_listings = active_listings + sold_listings
+        result = active_dom + sold_dom
 
         _debug = {
             "timestamp":      _dt.datetime.now().isoformat(),
             "platform":       "poshmark",
             "username":       username,
             "pm_version":     pm_version,
-            "api_active":     len(active_listings),
-            "api_sold":       len(sold_listings),
-            "total_returned": len(all_listings),
-            "sample_items":   all_listings[:3],
+            "dom_active":     len(active_dom),
+            "dom_sold":       len(sold_dom),
+            "total_returned": len(result),
+            "sample_items":   result[:3],
+            "api_probe":      api_probe,
         }
         _debug_path = os.path.join(
             os.path.expanduser("~"), ".baum-reseller", "debug_poshmark_sync.json"
@@ -401,7 +456,7 @@ class PoshmarkService:
         except Exception:
             pass
 
-        return all_listings
+        return result
 
 
 def _scrape_dom(page, status: str = "active") -> list[dict]:
@@ -497,6 +552,45 @@ def _parse_api_responses(responses: list[dict]) -> list[dict]:
                                item.get("cover_shot", {}).get("url_small") or ""),
             })
     return results
+
+
+def _probe_api_structure(page, username: str, pm_version: str) -> dict:
+    """
+    Fetch 3 items from the API and return their raw structure for debugging.
+    This tells us exactly what field names Poshmark uses so we can fix parsing.
+    """
+    from urllib.parse import quote
+    req = {
+        "filters": {"department": "All", "inventory_status": ["all"]},
+        "sort_by": "added_desc",
+        "experience": "all",
+        "count": 3,
+        "static_facets": False,
+        "shouldFetchFacetsForClosetRerank": False,
+        "shouldFetchFacetsForMobile": False,
+    }
+    api_url = (
+        f"https://poshmark.com/vm-rest/users/{username}/posts/filtered"
+        f"?request={quote(json.dumps(req, separators=(',', ':')))}"
+        f"&summarize=true&app_version=2.55&pm_version={pm_version}"
+    )
+    try:
+        data = page.evaluate("(url) => fetch(url).then(r => r.json())", api_url)
+        if not isinstance(data, dict):
+            return {"error": f"non-dict response: {type(data).__name__}", "raw": str(data)[:300]}
+        items = data.get("data")
+        first = items[0] if isinstance(items, list) and items else None
+        return {
+            "response_keys": list(data.keys()),
+            "data_type": type(items).__name__ if items is not None else "null",
+            "data_count": len(items) if isinstance(items, list) else None,
+            "more_type": type(data.get("more")).__name__,
+            "more_value": str(data.get("more"))[:80],
+            "first_item_keys": list(first.keys()) if isinstance(first, dict) else str(first)[:200],
+            "first_item": {k: str(v)[:100] for k, v in list(first.items())[:12]} if isinstance(first, dict) else str(first)[:300],
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 
 def _fetch_all_via_api(page, username: str, inventory_status: str = "all",
