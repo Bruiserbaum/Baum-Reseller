@@ -155,6 +155,15 @@ MIGRATIONS = [
     # Used by the reconciliation pass to detect listings that stopped appearing.
     "ALTER TABLE listings ADD COLUMN last_seen TEXT DEFAULT NULL",
     "CREATE INDEX IF NOT EXISTS idx_listings_last_seen ON listings(platform, last_seen)",
+    # Normalize Poshmark listing IDs to hex-only (strip title-slug suffix).
+    # DOM scraping produces IDs like "6a4b92eba6e3e9e4030df0f9-some-title";
+    # the API returns just the 24-char hex ID. This makes both sources match.
+    """UPDATE listings
+       SET listing_id = SUBSTR(listing_id, 1, 24),
+           url = 'https://poshmark.com/listing/' || SUBSTR(listing_id, 1, 24)
+       WHERE platform = 'poshmark'
+         AND LENGTH(listing_id) > 24
+         AND SUBSTR(listing_id, 25, 1) = '-'""",
     # Backfill: auto-convert existing sold listings → sales records.
     # Runs every startup but is idempotent (NOT EXISTS prevents duplication).
     """INSERT INTO sales

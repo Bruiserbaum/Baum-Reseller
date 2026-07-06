@@ -354,98 +354,66 @@ class PoshmarkService:
                 pass
 
             if progress_cb:
-                progress_cb(f"Loading closet for @{username}…")
+                progress_cb(f"Fetching listings for @{username}…")
 
-            # ── Pass 1: Default sort (Just Shared) ────────────────────────
+            # Load closet once to establish page context and capture pm_version
             page.goto(f"https://poshmark.com/closet/{username}",
                       wait_until="load", timeout=30_000)
-            page.wait_for_timeout(3_000)
-            prev_count = -1
-            stable_count = 0
-            for _ in range(30):
-                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                page.wait_for_timeout(1_200)
-                cur = page.evaluate(
-                    "document.querySelectorAll('a[href*=\"/listing/\"], a[href*=\"/edit/listing/\"]').length"
-                )
-                if cur == prev_count:
-                    stable_count += 1
-                    if stable_count >= 2:
-                        break
-                else:
-                    stable_count = 0
-                prev_count = cur
-            active_dom = _scrape_dom(page, status="active")
+            page.wait_for_timeout(2_000)
             pm_version = pm_version_found[0] if pm_version_found else "2026.27.01"
 
-            # ── Pass 2: Newest-first sort (catches never-shared items) ─────
-            if progress_cb:
-                progress_cb(f"Checking newest listings for @{username}…")
-            try:
-                page.goto(f"https://poshmark.com/closet/{username}?sort_by=added_desc",
-                          wait_until="load", timeout=20_000)
-                page.wait_for_timeout(3_000)
-                prev_count2 = -1
-                stable_count2 = 0
-                for _ in range(30):
-                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    page.wait_for_timeout(1_200)
-                    cur2 = page.evaluate(
-                        "document.querySelectorAll('a[href*=\"/listing/\"], a[href*=\"/edit/listing/\"]').length"
-                    )
-                    if cur2 == prev_count2:
-                        stable_count2 += 1
-                        if stable_count2 >= 2:
-                            break
-                    else:
-                        stable_count2 = 0
-                    prev_count2 = cur2
-                newest_dom = _scrape_dom(page, status="active")
-                existing_ids = {item["listing_id"] for item in active_dom}
-                active_dom += [i for i in newest_dom if i["listing_id"] not in existing_ids]
-            except Exception:
-                pass
+            # ── Primary: paginated API (complete coverage, no scroll limit) ─
+            active_listings = _fetch_all_via_api(
+                page, username, inventory_status="all",
+                pm_version=pm_version, progress_cb=progress_cb,
+            )
 
             if progress_cb:
-                progress_cb(f"Loading sold items for @{username}…")
+                progress_cb(f"Fetching sold listings for @{username}…")
 
-            page.goto(f"https://poshmark.com/closet/{username}?availability=sold_out",
-                      wait_until="load", timeout=30_000)
-            page.wait_for_timeout(3_000)
-            prev_count = -1
-            stable_count = 0
-            for _ in range(15):
-                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                page.wait_for_timeout(1_000)
-                cur = page.evaluate(
-                    "document.querySelectorAll('a[href*=\"/listing/\"], a[href*=\"/edit/listing/\"]').length"
-                )
-                if cur == prev_count:
-                    stable_count += 1
-                    if stable_count >= 2:
-                        break
-                else:
-                    stable_count = 0
-                prev_count = cur
-            sold_dom = _scrape_dom(page, status="sold")
+            sold_listings = _fetch_all_via_api(
+                page, username, inventory_status="sold_out",
+                pm_version=pm_version, progress_cb=progress_cb,
+            )
 
-            # ── API probe: 3 items to capture the real response structure ──
-            api_probe = _probe_api_structure(page, username, pm_version)
+            # ── Fallback: DOM scroll if API returned suspiciously few items ─
+            if len(active_listings) < 10:
+                if progress_cb:
+                    progress_cb("API returned few items — falling back to scroll…")
+                active_listings = _dom_scroll(page, username, progress_cb)
+                try:
+                    page.goto(f"https://poshmark.com/closet/{username}?availability=sold_out",
+                              wait_until="load", timeout=30_000)
+                    page.wait_for_timeout(3_000)
+                    pv, sv = -1, 0
+                    for _ in range(15):
+                        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                        page.wait_for_timeout(1_000)
+                        c = page.evaluate("document.querySelectorAll('a[href*=\"/listing/\"]').length")
+                        if c == pv:
+                            sv += 1
+                            if sv >= 2:
+                                break
+                        else:
+                            sv = 0
+                        pv = c
+                    sold_listings = _scrape_dom(page, status="sold")
+                except Exception:
+                    pass
 
             browser.close()
 
-        result = active_dom + sold_dom
+        result = active_listings + sold_listings
 
         _debug = {
             "timestamp":      _dt.datetime.now().isoformat(),
             "platform":       "poshmark",
             "username":       username,
             "pm_version":     pm_version,
-            "dom_active":     len(active_dom),
-            "dom_sold":       len(sold_dom),
+            "api_active":     len(active_listings),
+            "api_sold":       len(sold_listings),
             "total_returned": len(result),
             "sample_items":   result[:3],
-            "api_probe":      api_probe,
         }
         _debug_path = os.path.join(
             os.path.expanduser("~"), ".baum-reseller", "debug_poshmark_sync.json"
@@ -504,6 +472,10 @@ def _scrape_dom(page, status: str = "active") -> list[dict]:
     for item in (raw or []):
         m = re.search(r"/listing/([^/?#]+)", item.get("url", ""))
         lid = m.group(1) if m else ""
+        # Normalize: DOM returns "6a4b92eba6e3e9e4030df0f9-some-title-slug";
+        # strip the slug so IDs match what the API returns (hex-only).
+        if re.match(r"^[0-9a-f]{24}-", lid):
+            lid = lid[:24]
         if not lid or lid in seen:
             continue
         seen.add(lid)
@@ -514,7 +486,7 @@ def _scrape_dom(page, status: str = "active") -> list[dict]:
         results.append({
             "listing_id": lid,
             "title":      item.get("title", "Untitled"),
-            "url":        item.get("url", ""),
+            "url":        f"https://poshmark.com/listing/{lid}",
             "price":      price_val,
             "status":     status,
             "img_url":    item.get("img_url", ""),
@@ -552,6 +524,37 @@ def _parse_api_responses(responses: list[dict]) -> list[dict]:
                                item.get("cover_shot", {}).get("url_small") or ""),
             })
     return results
+
+
+def _dom_scroll(page, username: str, progress_cb=None) -> list[dict]:
+    """DOM-scroll fallback: two passes with stability detection."""
+    def _scroll_pass(url: str, max_scrolls: int) -> list[dict]:
+        page.goto(url, wait_until="load", timeout=30_000)
+        page.wait_for_timeout(3_000)
+        prev, stable = -1, 0
+        for _ in range(max_scrolls):
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            page.wait_for_timeout(1_200)
+            cur = page.evaluate(
+                "document.querySelectorAll('a[href*=\"/listing/\"], a[href*=\"/edit/listing/\"]').length"
+            )
+            if cur == prev:
+                stable += 1
+                if stable >= 2:
+                    break
+            else:
+                stable = 0
+            prev = cur
+        return _scrape_dom(page, status="active")
+
+    active = _scroll_pass(f"https://poshmark.com/closet/{username}", 30)
+    try:
+        newest = _scroll_pass(f"https://poshmark.com/closet/{username}?sort_by=added_desc", 30)
+        seen = {i["listing_id"] for i in active}
+        active += [i for i in newest if i["listing_id"] not in seen]
+    except Exception:
+        pass
+    return active
 
 
 def _probe_api_structure(page, username: str, pm_version: str) -> dict:
@@ -672,9 +675,12 @@ def _fetch_all_via_api(page, username: str, inventory_status: str = "all",
         if progress_cb and page_num % 5 == 0:
             progress_cb(f"Fetched {len(results)} {base_status} listings…")
 
+        # `more` is a dict: {'total': N, 'next_max_id': 'ENC_...', ...}
         more = data.get("more")
-        if not more:
+        if not isinstance(more, dict):
             break
-        max_id = more
+        max_id = more.get("next_max_id")
+        if not max_id:
+            break
 
     return results
