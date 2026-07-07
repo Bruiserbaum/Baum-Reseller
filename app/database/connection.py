@@ -155,10 +155,28 @@ MIGRATIONS = [
     # Used by the reconciliation pass to detect listings that stopped appearing.
     "ALTER TABLE listings ADD COLUMN last_seen TEXT DEFAULT NULL",
     "CREATE INDEX IF NOT EXISTS idx_listings_last_seen ON listings(platform, last_seen)",
-    # Normalize Poshmark listing IDs to hex-only (strip title-slug suffix).
-    # DOM scraping produces IDs like "6a4b92eba6e3e9e4030df0f9-some-title";
-    # the API returns just the 24-char hex ID. This makes both sources match.
-    """UPDATE listings
+    # Step 1: Remove hex-only Poshmark listing duplicates created by the broken
+    # v1.5.29 API sync. Only deletes a hex-only entry when a slug-format version
+    # of the same listing already exists (safe: the slug version is the real one).
+    """DELETE FROM listings
+       WHERE id IN (
+           SELECT l1.id FROM listings l1
+           WHERE l1.platform = 'poshmark'
+             AND LENGTH(l1.listing_id) = 24
+             AND l1.listing_id NOT GLOB '*-*'
+             AND EXISTS (
+                 SELECT 1 FROM listings l2
+                 WHERE l2.platform = 'poshmark'
+                   AND l2.listing_id LIKE l1.listing_id || '-%'
+             )
+       )""",
+    # Step 2: Delete items that now have no listings at all (orphaned by step 1).
+    """DELETE FROM items
+       WHERE sync_source = 'poshmark'
+         AND id NOT IN (SELECT DISTINCT item_id FROM listings)""",
+    # Step 3: Normalize remaining slug-format IDs to hex-only.
+    # Uses OR IGNORE so a pre-existing hex-only entry silently wins the conflict.
+    """UPDATE OR IGNORE listings
        SET listing_id = SUBSTR(listing_id, 1, 24),
            url = 'https://poshmark.com/listing/' || SUBSTR(listing_id, 1, 24)
        WHERE platform = 'poshmark'
